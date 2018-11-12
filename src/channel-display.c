@@ -40,6 +40,7 @@
 #include "decode.h"
 #include "common/rect.h"
 
+
 /**
  * SECTION:channel-display
  * @short_description: remote display area
@@ -64,6 +65,79 @@
 
 #define MONITORS_MAX 256
 
+
+#ifdef FUSIONDATA_DEV
+/* add by yhoon17, 20170829 : */
+#include <assert.h>
+#include <libavutil/opt.h>
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavformat/avio.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
+
+#ifndef G_OS_WIN32
+#include <ctype.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
+
+typedef struct StreamRenderContext
+{   
+    int nSock;
+    int nMajorProtocol;
+    int nMinorProtocol;
+    
+    /* config */
+    int nStreamPort;
+    int nStreamOnMovieDetection;
+    int nOnVariationCapture;
+    int nMaxSamplingFps;
+    int nAudioSyncNot;
+    
+    SpiceChannel *channel;
+    SpiceRect dest;
+    
+    GThread *pstThread;
+    GCond stCond;
+    GMutex stMutex;
+    
+    GQueue *pstMsgQueue;
+    GQueue *pstLatencyQueue;
+    
+    int nUse;
+    int nStatus;
+    int nRgbStride;
+    uint32_t unSequenceNum;
+    uint64_t ulStatTimeStamp;
+    guint unTimeoutId;
+    
+    void *pData;
+} STREAM_RENDER_CONTEXT_T;
+
+
+typedef struct EncoderHeader
+{   
+    uint32_t unTotalSize;
+    uint32_t unHeaderSize;
+    uint32_t unDataSize;
+    uint32_t nWidth;
+    uint32_t nHeight;
+    uint32_t nSequenceNum;
+    uint32_t unCodec;
+    uint32_t unCodecPrivateHeaderSize;
+} ENCODER_HEADER_T;
+
+
+typedef struct Es_Private_header
+{   
+    uint32_t unMp4esHeaderSize;
+    uint32_t unWhetherSync;
+    uint32_t unPaddingForMemAlign[4 - ( (sizeof(ENCODER_HEADER_T) / 32) % 4)];
+} ES_PRIVATE_HEADER_T;
+#endif
+
 struct _SpiceDisplayChannelPrivate {
     GHashTable                  *surfaces;
     display_surface             *primary;
@@ -84,6 +158,10 @@ struct _SpiceDisplayChannelPrivate {
     HDC dc;
 #endif
     char * report;
+#ifdef FUSIONDATA_DEV
+    /* add by yhoon17, 20180329 : 동영상 가속기 STREAM_RENDER_CONTEXT */
+    STREAM_RENDER_CONTEXT_T stStreamRenderCtx;
+#endif
 };
 
 G_DEFINE_TYPE(SpiceDisplayChannel, spice_display_channel, SPICE_TYPE_CHANNEL)
@@ -107,6 +185,57 @@ enum {
 
     SPICE_DISPLAY_LAST_SIGNAL,
 };
+
+
+#ifdef FUSIONDATA_DEV
+/* add by yhoon17, 20170829 : */
+enum
+{
+    STREAM_RENDER_START = 0,
+    STREAM_RENDER_PAUSE_REQ,
+    STREAM_RENDER_PAUSE_RSP,
+    STREAM_RENDER_RUN_REQ,
+    STREAM_RENDER_RUN_RSP,
+    STREAM_RENDER_FIN_REQ,
+    STREAM_RENDER_FIN_RSP,
+};
+
+int _nStreamPort = 0;
+int _nStreamOnMovieDetection = 0;
+int _nOnVariationCapture = 0;
+int _nMaxSamplingFps = 0;
+int _nAudioSyncNot = 0;
+
+int ReadSpiceStreamConfig(void);
+int GetOptFilePath(const gchar *pszName, char *pszPath);
+int TrimSpace(char *pszStr);
+int TrimLeftSpace(char *pszStr);
+int TrimRightSpace(char *pszStr);
+
+static void DisplayHandleStreamConfig(SpiceChannel *channel, SpiceMsgIn *in);
+static void DisplayHandleStreamFrameData(SpiceChannel *channel, SpiceMsgIn *in);
+SPICE_GNUC_UNUSED static void DisplayChannelSendMsgStreamConfig(SpiceChannel *channel, uint32_t unStreamPort, uint32_t unStreamOnMovieDetection, uint32_t unOnVariationCapture, uint32_t unMaxSamplingFps);
+SPICE_GNUC_UNUSED static void DisplayChannelSendMsgStreamStatData(SpiceChannel *channel, uint32_t unBacklogSize);
+
+static void StreamRenderContextInit(GObject *object);
+static void StreamRenderContextDestructor(GObject *object);
+void *StreamRenderThread(void *data);
+static void JoinStreamRenderThread(GObject *object);
+static void SetStreamRenderConfig(SpiceChannel *channel);
+static int ProcessPauseFinRequest(SpiceChannel *channel);
+static gboolean StreamFrameSchedule(SpiceChannel *channel);
+static gboolean StreamFrameDataMoveIntoMsgq(SpiceChannel *channel);
+static void SendStreamFrameDataToDecoder(SpiceChannel *channel, SpiceMsgIn *in);
+static void ResetStreamFrameSchedule(SpiceChannel *channel);
+static gboolean DisplayStreamRenderFrame(STREAM_RENDER_CONTEXT_T *pstStreamRenderCtx);
+static uint32_t DisplayChannelGetDecodingQueueSize(SpiceChannel *channel);
+static int ReadEncodedFrame(SpiceChannel *channel, char *recvHeaderbuf, char *dataFramebuf);
+static void MsgInUnrefFuncGpointer(gpointer data, gpointer user_data);
+static gboolean MsgInUnrefFuncSpiceMsgIn(SpiceMsgIn *in);
+int GetStreamRenderSocket(SpiceChannel *channel);
+int SendDataToSocket(int nSock, void *pData, int nLength);
+int RecvDataFromSocket(int nSock, void *pData, int nLength);
+#endif
 
 static guint signals[SPICE_DISPLAY_LAST_SIGNAL];
 
@@ -134,6 +263,15 @@ static void spice_display_channel_dispose(GObject *object)
         c->mark_false_event_id = 0;
     }
 
+#ifdef FUSIONDATA_DEV
+    /* add by yhoon17, 20180329 : 동영상 가속기 destructor */
+    g_message("StreamRenderContext is disposed.");
+
+    StreamRenderContextDestructor(object);
+
+    g_message("StreamRenderContext is destructed.");
+#endif
+
     if (G_OBJECT_CLASS(spice_display_channel_parent_class)->dispose)
         G_OBJECT_CLASS(spice_display_channel_parent_class)->dispose(object);
 }
@@ -147,6 +285,8 @@ static void spice_display_channel_finalize(GObject *object)
     g_hash_table_unref(c->surfaces);
     clear_streams(SPICE_CHANNEL(object));
     g_clear_pointer(&c->palettes, cache_unref);
+
+
 
     if (G_OBJECT_CLASS(spice_display_channel_parent_class)->finalize)
         G_OBJECT_CLASS(spice_display_channel_parent_class)->finalize(object);
@@ -170,6 +310,16 @@ static void spice_display_channel_constructed(GObject *object)
                                   G_CALLBACK(display_session_mm_time_reset_cb),
                                   SPICE_CHANNEL(object), 0);
 
+#ifdef FUSIONDATA_DEV
+    /* add by yhoon17, 20180329 :  동영상 가속기 init */
+    memset( &c->stStreamRenderCtx, 0x00, sizeof(c->stStreamRenderCtx) );
+
+    c->stStreamRenderCtx.pstMsgQueue = NULL;
+
+    StreamRenderContextInit(object);
+
+    g_message("StreamRenderContext constructed.");
+#endif
 
     if (G_OBJECT_CLASS(spice_display_channel_parent_class)->constructed)
         G_OBJECT_CLASS(spice_display_channel_parent_class)->constructed(object);
@@ -235,6 +385,12 @@ static void spice_display_set_property(GObject      *object,
 /* main or coroutine context */
 static void spice_display_channel_reset(SpiceChannel *channel, gboolean migrating)
 {
+#ifdef FUSIONDATA_DEV
+    /* add by yhoon17, 20180329 :  동영상 가속기 */
+    g_message("spice_display_channel_reset()");
+    StreamRenderContextDestructor( &channel->parent );
+    StreamRenderContextInit( &channel->parent );
+#endif
     /* palettes, images, and glz_window are cleared in the session */
     clear_streams(channel);
     clear_surfaces(channel, TRUE);
@@ -1061,12 +1217,13 @@ static gboolean display_stream_schedule(display_stream *st)
     guint32 time, d;
     SpiceStreamDataHeader *op;
     SpiceMsgIn *in;
+    gboolean invalid_mm_time;
 
     SPICE_DEBUG("%s", __FUNCTION__);
     if (st->timeout || !session)
         return TRUE;
 
-    time = spice_session_get_mm_time(session);
+    time = spice_session_get_mm_time(session, &invalid_mm_time);
     in = g_queue_peek_head(st->msgq);
 
     if (in == NULL) {
@@ -1074,6 +1231,11 @@ static gboolean display_stream_schedule(display_stream *st)
     }
 
     op = spice_msg_in_parsed(in);
+    if (invalid_mm_time) {
+        SPICE_DEBUG("scheduling next stream render in %u ms", 0);
+        st->timeout = g_timeout_add(0, (GSourceFunc)display_stream_render, st);
+        return TRUE;
+    }
     if (time < op->multi_media_time) {
         d = op->multi_media_time - time;
         SPICE_DEBUG("scheduling next stream render in %u ms", d);
@@ -1260,7 +1422,7 @@ static gboolean display_stream_render(display_stream *st)
 #define STREAM_REPORT_DROP_SEQ_LEN_LIMIT 3
 
 static void display_update_stream_report(SpiceDisplayChannel *channel, uint32_t stream_id,
-                                         uint32_t frame_time, int32_t latency)
+                                         uint32_t frame_time, int32_t latency, gboolean invalid_mm_time)
 {
     display_stream *st = channel->priv->streams[stream_id];
     guint64 now;
@@ -1276,7 +1438,7 @@ static void display_update_stream_report(SpiceDisplayChannel *channel, uint32_t 
     }
     st->report_num_frames++;
 
-    if (latency < 0) { // drop
+    if (latency < 0 && !invalid_mm_time) { // drop
         st->report_num_drops++;
         st->report_drops_seq_len++;
     } else {
@@ -1437,13 +1599,14 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
     display_stream *st;
     guint32 mmtime;
     int32_t latency;
+    gboolean invalid_mm_time;
 
     g_return_if_fail(c != NULL);
     g_return_if_fail(c->streams != NULL);
     g_return_if_fail(c->nstreams > op->id);
 
     st =  c->streams[op->id];
-    mmtime = spice_session_get_mm_time(spice_channel_get_session(channel));
+    mmtime = spice_session_get_mm_time(spice_channel_get_session(channel), &invalid_mm_time);
 
     if (spice_msg_in_type(in) == SPICE_MSG_DISPLAY_STREAM_DATA_SIZED) {
         CHANNEL_DEBUG(channel, "stream %d contains sized data", op->id);
@@ -1460,7 +1623,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
     st->num_input_frames++;
 
     latency = op->multi_media_time - mmtime;
-    if (latency < 0) {
+    if (!invalid_mm_time && latency < 0) {
         CHANNEL_DEBUG(channel, "stream data too late by %u ms (ts: %u, mmtime: %u), dropping",
                       mmtime - op->multi_media_time, op->multi_media_time, mmtime);
         st->arrive_late_time += mmtime - op->multi_media_time;
@@ -1472,7 +1635,11 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
         st->cur_drops_seq_stats.len++;
         st->playback_sync_drops_seq_len++;
     } else {
-        CHANNEL_DEBUG(channel, "video latency: %d", latency);
+        if (invalid_mm_time) {
+            CHANNEL_DEBUG(channel, "Invalid mm_time. Not checking video-audio sync");
+        } else {
+            CHANNEL_DEBUG(channel, "video latency: %d", latency );
+        }
         spice_msg_in_ref(in);
         display_stream_test_frames_mm_time_reset(st, in, mmtime);
         g_queue_push_tail(st->msgq, in);
@@ -1489,7 +1656,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
     }
     if (c->enable_adaptive_streaming) {
         display_update_stream_report(SPICE_DISPLAY_CHANNEL(channel), op->id,
-                                     op->multi_media_time, latency);
+                                     op->multi_media_time, latency, invalid_mm_time);
         if (st->playback_sync_drops_seq_len >= STREAM_PLAYBACK_SYNC_DROP_SEQ_LEN_LIMIT) {
             spice_session_sync_playback_latency(spice_channel_get_session(channel));
             st->playback_sync_drops_seq_len = 0;
@@ -1895,7 +2062,1445 @@ static void channel_set_handlers(SpiceChannelClass *klass)
         [ SPICE_MSG_DISPLAY_SURFACE_DESTROY ]    = display_handle_surface_destroy,
 
         [ SPICE_MSG_DISPLAY_MONITORS_CONFIG ]    = display_handle_monitors_config,
+#ifdef FUSIONDATA_DEV
+        /* add by yhoon17, 20180329 : 동영상 가속기 */
+        [ SPICE_MSGC_DISPLAY_StreamConfig ]      = DisplayHandleStreamConfig,
+        [ SPICE_MSGC_DISPLAY_StreamFrameData ]   = DisplayHandleStreamFrameData,
+#endif
     };
+    
 
     spice_channel_set_handlers(klass, handlers, G_N_ELEMENTS(handlers));
+    
 }
+
+
+#ifdef FUSIONDATA_DEV
+/**************************************************
+ * FUSIONDATA 에서 추가 개발한 Functions
+ **************************************************/
+
+/*
+ * Description : JClient에서 생성하는 spice_stream.config file read
+ * Date        : 20180329
+ */
+int ReadSpiceStreamConfig(void)
+{
+
+    int i = 0, j = 0;
+    int nFlag = FALSE;
+    int *pnSetValue = NULL;
+    char szBuf[ 1024 ];
+    char szValue[ 1024 ];
+    char szData[ 4096 ];
+    FILE *pstFp = NULL;
+
+
+    /* default config value */
+    _nStreamPort = 0;
+    _nStreamOnMovieDetection = 0;
+    _nOnVariationCapture = 1;
+    _nMaxSamplingFps = 30;
+    _nAudioSyncNot = 0;
+
+    memset(szBuf, 0x00, sizeof(szBuf));
+
+    GetOptFilePath("spice_stream.config", szBuf);
+
+    g_message("%s, szBuf = %s", __FUNCTION__, szBuf);
+
+    while ( (pstFp = fopen(szBuf, "r")) == NULL )
+    {
+        if ( (pstFp = fopen(szBuf, "w")) == NULL )
+        {
+            g_printerr("fopen() failed");
+            return -1;
+        }
+        else
+        {
+            memset(szData, 0x00, sizeof(szData));
+
+            sprintf(szData,
+                "# If value is <0, original spice is processed.\n"
+                "# if stream_port=0, combined display channel is used.\n"
+                "# if stream_port>1000, use stream_port as binding port for stream connection\n"
+                "# else stream_port+spice_(tls)port is used as binding port for stream connection\n"
+                "stream_port=%d\n"
+                "# The following parameter set whether auto turning on stream_encoding only when video is detected\n"
+                "# movie is to be detected when user starts to play movie like youtube video\n"
+                "stream_onMovieDetection=%d\n"
+                "# if 0, static capture at max_samplig_fps, else caputre only when screen variation occurs\n"
+                "# this can reduce encoding cpu overhead\n"
+                "on_variation_capture=%d\n"
+                "# max stream sampling fps is set, which is used to reduce server cpu load at the cost of QoE\n"
+                "max_sampling_fps=%d\n"
+                "# audio_sync_not is set, which is used to sync video with audio by delaying video frame display\n"
+                "# if audio_sync_not is 1, do not try to sync video to audio, which enhance delay performance(i.e,low delay)\n"
+                "audio_sync_not=%d\n",
+                _nStreamPort, _nStreamOnMovieDetection, _nOnVariationCapture, _nMaxSamplingFps, _nAudioSyncNot);
+
+            fwrite(szData, 1, strlen(szData), pstFp);
+
+            fclose(pstFp);
+        }
+    }
+
+    g_message("read option values in spice_stream.config");
+
+    while ( !(feof(pstFp)) )
+    {
+        i = 0, nFlag = FALSE;
+
+        memset(szBuf, 0x00, sizeof(szBuf));
+
+        fgets(szBuf, sizeof(szBuf), pstFp);
+
+        TrimSpace(szBuf);
+
+        if (strncmp(szBuf, "stream_port", strlen("stream_port")) == 0)
+        {
+            nFlag = TRUE;
+            pnSetValue = &_nStreamPort;
+            i = strlen("stream_port");
+        }
+        else if (strncmp(szBuf, "stream_onMovieDetection", strlen("stream_onMovieDetection")) == 0)
+        {
+            nFlag = TRUE;
+            pnSetValue = &_nStreamOnMovieDetection;
+            i = strlen("stream_onMovieDetection");
+        }
+        else if (strncmp(szBuf, "on_variation_capture", strlen("on_variation_capture")) == 0)
+        {
+            nFlag = TRUE;
+            pnSetValue = &_nOnVariationCapture;
+            i = strlen("on_variation_capture");
+        }
+        else if (strncmp(szBuf, "max_sampling_fps", strlen("max_sampling_fps")) == 0)
+        {
+            nFlag = TRUE;
+            pnSetValue = &_nMaxSamplingFps;
+            i = strlen("max_sampling_fps");
+        }
+        else if (strncmp(szBuf, "audio_sync_not", strlen("audio_sync_not")) == 0)
+        {
+            nFlag = TRUE;
+            pnSetValue = &_nAudioSyncNot;
+            i = strlen("audio_sync_not");
+        }
+
+        if (nFlag == TRUE)
+        {
+            memset(szValue, 0x00, sizeof(szValue));
+
+            for ( ; szBuf[i]; i++)
+            {
+                if ( !(szBuf[i] == ' ' || szBuf[i] == '\t' || szBuf[i] == '=') )
+                {
+                    break;
+                }
+            }
+
+            for (j = 0; szBuf[i]; i++)
+            {
+                if (szBuf[i] == ' ' || szBuf[i] == '\t' || szBuf[i] == '\n')
+                {
+                    break;
+                }
+                else
+                {
+                    szValue[j++] = szBuf[i];
+                }
+            }
+
+            szValue[j] = '\0';
+
+            *pnSetValue = atoi(szValue);
+        }
+    }
+
+    g_message("option values in spice_stream.config");
+    g_message("stream_port             : [ %d ]", _nStreamPort);
+    g_message("stream_onMovieDetection : [ %d ]", _nStreamOnMovieDetection);
+    g_message("on_variation_capture    : [ %d ]", _nOnVariationCapture);
+    g_message("max_sampling_fps        : [ %d ]", _nMaxSamplingFps);
+    g_message("audio_sync_not          : [ %d ]", _nAudioSyncNot);
+
+    fclose(pstFp);
+
+    return 0;
+}
+
+
+/*
+ * Description : SPC/bin/opt에 있는 file full path 리턴
+ * Date        : 20180329
+ */
+int GetOptFilePath(const gchar *pszName, char *pszPath)
+{
+    gboolean nSuccess = FALSE;
+    gchar *pszFullName = NULL;
+    gchar *pszBaseName = NULL;
+    gchar *pszStr = NULL;
+
+
+#ifdef G_OS_WIN32
+    pszFullName = g_path_get_dirname( g_find_program_in_path( g_get_prgname() ) );
+#else
+    char szArBuf[ 256 ];
+
+    memset(szArBuf, 0x00, sizeof(szArBuf));
+
+    readlink("/proc/self/exe", szArBuf, 256);
+
+    pszFullName = g_path_get_dirname(szArBuf);
+#endif
+
+    nSuccess = g_path_is_absolute(pszFullName);
+
+    if (nSuccess)
+    {
+        pszBaseName = pszFullName;
+    }
+    else
+    {
+        pszBaseName = g_get_current_dir();
+    }
+
+    pszStr = g_build_filename(pszBaseName, "opt", pszName, NULL);
+
+    strncpy(pszPath, pszStr, strlen(pszStr));
+
+    g_free(pszStr);
+
+    return 0;
+}
+
+
+/*
+ * Description : 공백 제거
+ * Date        : 20180329
+ */
+int TrimSpace(char *pszStr)
+{
+    TrimLeftSpace(pszStr);
+    TrimRightSpace(pszStr);
+
+    return 0;
+}
+
+
+/*
+ * Description : 왼쪽 공백 제거
+ * Date        : 20180329
+ */
+int TrimLeftSpace(char *pszStr)
+{
+    int i = 0;
+    char szTemp[ 1024 ];
+
+
+    for (i = 0; pszStr[i]; i++)
+    {
+        if ( !(isspace( (int) pszStr[i] )) )
+        {
+            break;
+        }
+    }
+
+    if (i && pszStr[i])
+    {
+        memset(szTemp, 0x00, sizeof(szTemp));
+
+        strcpy(szTemp, pszStr + i);
+
+        memset(pszStr, 0x00, sizeof(1024));
+
+        strcpy(pszStr, szTemp);
+    }
+
+    return 0;
+}
+
+
+/*
+ * Description : 오른쪽 공백 제거
+ * Date        : 20180329
+ */
+int TrimRightSpace(char *pszStr)
+{
+    int i = 0;
+    int nLength = strlen(pszStr);
+
+
+    for (i = (nLength - 1); i >= 0; i--)
+    {
+        if (isspace( (int) pszStr[i] ))
+        {
+            pszStr[i] = '\0';
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    return 0;
+}
+
+
+/*
+ * Description : Stream Config Message 처리
+ * Date        : 20180329
+ */
+static void DisplayHandleStreamConfig(SpiceChannel *channel, SpiceMsgIn *in)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    SpiceMsgDisplayStreamConfig *op = spice_msg_in_parsed(in);
+
+
+    g_message("server altinative stream info");
+    g_message("stream_port             : [ %d ]", op->nStreamPort);
+    g_message("stream_onMovieDetection : [ %u ]", op->unStreamOnMovieDetection);
+    g_message("on_variation_capture    : [ %u ]", op->unOnVariationCapture);
+    g_message("max_sampling_fps        : [ %u ]", op->unMaxSamplingFps);
+
+    c->stStreamRenderCtx.nMajorProtocol = op->unStreamOnMovieDetection;
+    c->stStreamRenderCtx.nMinorProtocol = op->unOnVariationCapture;
+
+    SetStreamRenderConfig(channel);
+
+    if (c->stStreamRenderCtx.nStreamPort == 0)
+    {
+        c->stStreamRenderCtx.nUse = 1;
+
+        DisplayChannelSendMsgStreamConfig(channel,
+            c->stStreamRenderCtx.nStreamPort, c->stStreamRenderCtx.nStreamOnMovieDetection,
+            c->stStreamRenderCtx.nOnVariationCapture, c->stStreamRenderCtx.nMaxSamplingFps);
+    }
+}
+
+
+/*
+ * Description : Stream Frame Data Message 처리
+ * Date        : 20180329
+ */
+static void DisplayHandleStreamFrameData(SpiceChannel *channel, SpiceMsgIn *in)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    SpiceMsgDisplayStreamFrameData *op = spice_msg_in_parsed(in);
+    int q_size = 0;
+    int latency_q_size = 0;
+
+
+    if (op->unMultiMediaTime == 0 || c->stStreamRenderCtx.nAudioSyncNot == 1)
+    {
+        SendStreamFrameDataToDecoder(channel, in);
+        return;
+    }
+
+    if (c->stStreamRenderCtx.unSequenceNum != 0 && op->unId != (++c->stStreamRenderCtx.unSequenceNum))
+    {
+        ResetStreamFrameSchedule(channel);
+    }
+
+    if (c->stStreamRenderCtx.unSequenceNum == 0)
+    {
+        c->stStreamRenderCtx.unSequenceNum = op->unId;
+    }
+
+    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+    q_size = g_queue_get_length(c->stStreamRenderCtx.pstMsgQueue);
+
+    g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+    latency_q_size = g_queue_get_length(c->stStreamRenderCtx.pstLatencyQueue);
+
+    if (q_size + latency_q_size >= 7)
+    {
+        if (c->stStreamRenderCtx.nMajorProtocol >= 2)
+        {
+            if (g_get_monotonic_time() - c->stStreamRenderCtx.ulStatTimeStamp > 1000 * 1000)
+            {
+                DisplayChannelSendMsgStreamStatData(channel, DisplayChannelGetDecodingQueueSize(channel));
+            }
+        }
+
+        g_message("stream frame data qsize = %d, latency msg q-size = %d", q_size, latency_q_size);
+    }
+
+    spice_msg_in_ref(in);
+
+    g_queue_push_tail(c->stStreamRenderCtx.pstLatencyQueue, in);
+
+    StreamFrameSchedule(channel);
+}
+
+
+/*
+ * Description : Stream Config Message 설정
+ * Date        : 20180329
+ */
+SPICE_GNUC_UNUSED static void DisplayChannelSendMsgStreamConfig(SpiceChannel *channel, uint32_t unStreamPort, uint32_t unStreamOnMovieDetection, uint32_t unOnVariationCapture, uint32_t unMaxSamplingFps)
+{
+    SPICE_GNUC_UNUSED SpiceSession *session = spice_channel_get_session(channel);
+    SpiceMsgDisplayStreamConfig stStreamConfig;
+    SpiceMsgOut *msg;
+
+
+    stStreamConfig.nStreamPort = unStreamPort;
+    stStreamConfig.unStreamOnMovieDetection = unStreamOnMovieDetection;
+    stStreamConfig.unOnVariationCapture = unOnVariationCapture;
+    stStreamConfig.unMaxSamplingFps = unMaxSamplingFps;
+    
+
+    msg = spice_msg_out_new(channel, SPICE_MSGC_DISPLAY_StreamConfig);
+    msg->marshallers->msg_display_stream_config(msg->marshaller, &stStreamConfig);
+    spice_msg_out_send(msg);
+}
+
+
+/*
+ * Description : Stream Stat Data Message 설정
+ * Date        : 20180329
+ */
+SPICE_GNUC_UNUSED static void DisplayChannelSendMsgStreamStatData(SpiceChannel *channel, uint32_t unBacklogSize)
+{
+    SPICE_GNUC_UNUSED SpiceSession *session = spice_channel_get_session(channel);
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    SpiceMsgDisplayStreamStatData stStreamStatData;
+    SpiceMsgOut *msg;
+
+
+    stStreamStatData.unStreamBacklogSize = unBacklogSize;
+
+    msg = spice_msg_out_new(channel, SPICE_MSGC_DISPLAY_StreamStatData);
+    msg->marshallers->msg_display_stream_stat_data(msg->marshaller, &stStreamStatData);
+    spice_msg_out_send(msg);
+
+    c->stStreamRenderCtx.ulStatTimeStamp = g_get_monotonic_time();
+}
+
+
+/*
+ * Description : StreamRenderContext init
+ * Date        : 20180329
+ */
+static void StreamRenderContextInit(GObject *object)
+{
+    SpiceChannel *channel = SPICE_CHANNEL(object);
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    GError *error = NULL;
+
+
+    c->stStreamRenderCtx.channel = SPICE_CHANNEL(object);
+    c->stStreamRenderCtx.pData = 0;
+
+    c->stStreamRenderCtx.pstThread = 0;
+
+    c->stStreamRenderCtx.nStreamPort = 0;
+    c->stStreamRenderCtx.nStreamOnMovieDetection = 1;
+    c->stStreamRenderCtx.nOnVariationCapture = 1;
+    c->stStreamRenderCtx.nMaxSamplingFps = 30;
+    c->stStreamRenderCtx.nAudioSyncNot = 0;
+
+    c->stStreamRenderCtx.unSequenceNum = 0;
+    c->stStreamRenderCtx.unTimeoutId = 0;
+
+    c->stStreamRenderCtx.nUse = 0;
+
+    if (c->stStreamRenderCtx.pstMsgQueue == NULL)
+    {
+        c->stStreamRenderCtx.pstMsgQueue = g_queue_new();
+        c->stStreamRenderCtx.pstLatencyQueue = g_queue_new();
+
+        g_mutex_init( &c->stStreamRenderCtx.stMutex );
+        g_cond_init( &c->stStreamRenderCtx.stCond );
+    }
+
+    if (c->stStreamRenderCtx.pstThread == (GThread *) 0)
+    {
+        c->stStreamRenderCtx.nStatus = STREAM_RENDER_START;
+
+        if ( !(c->stStreamRenderCtx.pstThread = g_thread_create(StreamRenderThread, channel, FALSE, &error)) )
+        {
+            g_printerr("Error: %s", error->message);
+            exit(-1);
+        }
+
+        g_message("gtk created stream receiving thread");
+    }
+
+    g_message("StreamRenderContext inited");
+}
+
+
+/*
+ * Description : StreamRenderContext destructor
+ * Date        : 20180329
+ */
+static void StreamRenderContextDestructor(GObject *object)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(object)->priv;
+
+
+    JoinStreamRenderThread(object);
+
+    g_message("joined stream thread at destructor");
+
+    ResetStreamFrameSchedule( &SPICE_DISPLAY_CHANNEL(object)->parent );
+
+    if (c->stStreamRenderCtx.pstMsgQueue)
+    {
+        g_queue_foreach(c->stStreamRenderCtx.pstMsgQueue, MsgInUnrefFuncGpointer, NULL);
+        g_queue_free(c->stStreamRenderCtx.pstMsgQueue);
+        c->stStreamRenderCtx.pstMsgQueue = NULL;
+
+        g_queue_foreach(c->stStreamRenderCtx.pstLatencyQueue, MsgInUnrefFuncGpointer, NULL);
+        g_queue_free(c->stStreamRenderCtx.pstLatencyQueue);
+        c->stStreamRenderCtx.pstLatencyQueue = NULL;
+
+        g_mutex_clear( &c->stStreamRenderCtx.stMutex );
+        g_cond_clear( &c->stStreamRenderCtx.stCond );
+    }
+
+    c->stStreamRenderCtx.pData = 0;
+    c->stStreamRenderCtx.channel = NULL;
+}
+
+
+/*
+ * Description : StreamRender thread
+ * Date        : 20180329
+ */
+void *StreamRenderThread(void *data)
+{
+    SpiceChannel *channel = data;
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    SpiceRect dest;
+    display_surface *surface = NULL;
+    ENCODER_HEADER_T *pstHeader = NULL;
+    ES_PRIVATE_HEADER_T *pstMp4esHeader;
+    AVCodecContext *pstCodecCtx = NULL;
+    AVCodec *pstCodec = NULL;
+    AVFrame *pstFrame = NULL;
+    AVPacket stPacket;
+    AVPicture stPicture;
+    int nSock = 0;
+    int nFrameFinished = 0;
+    int nSize = 0;
+    int nWidth = 0;
+    int nHeight = 0;
+    int nHeader = 0;
+    int nLen = 0;
+    int nFlag = TRUE;
+    uint8_t uszRecvHeaderBuf[1000];
+    uint8_t *puszRgbData = NULL;
+    uint8_t *puszDataFrameBuf = NULL;
+    struct SwsContext *pstSwsCtx = NULL;
+
+
+    /* read stream port config, if needed */
+    if(c->stStreamRenderCtx.nUse != 1)
+    {
+        SetStreamRenderConfig(channel);
+    }
+
+    /* set stream port */
+    if(c->stStreamRenderCtx.nStreamPort < 0)
+    {
+        //if <0, then acts as a normal original spice client, don't make encoding thread.
+        g_message("original spice mode");
+        c->stStreamRenderCtx.pstThread = 0;
+
+        return NULL;
+    }
+    
+    if (c->stStreamRenderCtx.nStreamPort != 0 && !(c->stStreamRenderCtx.nUse) )
+    {
+        if ( (c->stStreamRenderCtx.nSock = nSock = GetStreamRenderSocket(channel)) < 0)
+        {
+            g_printerr("error to get stream socket connection");
+            g_message("error to get stream socket connection");
+            c->stStreamRenderCtx.pstThread = 0;
+
+            return NULL;
+        }
+        
+    }
+    else
+    {
+        g_message("use combined channel for display stream");
+
+        c->stStreamRenderCtx.nSock = -1;
+
+        if (c->stStreamRenderCtx.nStreamPort == 0 && !(c->stStreamRenderCtx.nUse) )
+        {
+            g_message("use combined stream channel, but not recieved server confirm msg yet. waiting..");
+            c->stStreamRenderCtx.nUse = 1;
+        }
+    }
+
+    avcodec_register_all();
+    av_register_all();
+
+    memset(uszRecvHeaderBuf, 0x00, sizeof(uszRecvHeaderBuf));
+
+    puszDataFrameBuf = (uint8_t *) malloc (1920 * 1080 * 4 * 4);
+
+    pstHeader = (ENCODER_HEADER_T *) uszRecvHeaderBuf;
+
+    do {
+        if (ProcessPauseFinRequest(channel) < 0)
+        {
+            c->stStreamRenderCtx.pstThread = 0;
+            return 0;
+        }
+
+        if (ReadEncodedFrame(channel, (char *) pstHeader, (char *) puszDataFrameBuf) < 0)
+        {
+            c->stStreamRenderCtx.pstThread = 0;
+            c->stStreamRenderCtx.nStatus = STREAM_RENDER_FIN_RSP;
+
+            g_cond_signal( &c->stStreamRenderCtx.stCond );
+
+            return 0;
+        }
+        pstMp4esHeader = (ES_PRIVATE_HEADER_T *) ((char *) uszRecvHeaderBuf + sizeof(ENCODER_HEADER_T));
+
+        nSize = pstHeader->unDataSize;
+
+        assert(pstHeader->unTotalSize == pstHeader->unHeaderSize + pstHeader->unDataSize);
+        assert(pstHeader->unHeaderSize == sizeof(ENCODER_HEADER_T) + pstHeader->unCodecPrivateHeaderSize);
+
+        nHeader = (pstHeader->unCodec == 60000 ? pstMp4esHeader->unMp4esHeaderSize : 0);
+
+        nWidth = pstHeader->nWidth;
+        nHeight = pstHeader->nHeight;
+
+        //g_message("do - while in nWidth = %d, nHeight = %d",  nWidth, nHeight);
+
+        if ( (nFlag == TRUE) || (pstHeader->nSequenceNum == 0) || (nHeader != 0) ||
+            (nWidth != pstCodecCtx->width) || (nHeight != pstCodecCtx->height) )
+        {
+            if (nFlag == TRUE)
+            {
+                nFlag = FALSE;
+            }
+            else
+            {
+                av_free_packet( &stPacket );
+                av_free(pstFrame);
+                avcodec_close(pstCodecCtx);
+            }
+
+            av_init_packet( &stPacket );
+
+            /* find the mpeg1 video decoder */
+            if ( !(pstCodec = avcodec_find_decoder(pstHeader->unCodec == 60000 ? CODEC_ID_MPEG4 : AV_CODEC_ID_H264)) )
+            {
+                g_printerr("avcodec_find_decoder() failed.");
+                g_message("avcodec_find_decoder() failed.");
+                exit(1);
+            }
+
+            pstCodecCtx = avcodec_alloc_context3(pstCodec);
+
+            pstFrame = avcodec_alloc_frame();
+
+            if (pstCodec->capabilities & CODEC_CAP_TRUNCATED)
+            {
+                /* we do not send complete frames */
+                pstCodecCtx->flags |= CODEC_FLAG_TRUNCATED;
+            }
+
+            if (avcodec_open2(pstCodecCtx, pstCodec, NULL) < 0)
+            {
+                g_printerr("avcodec_open2() failed.");
+                exit(1);
+            }
+
+            pstCodecCtx->width = nWidth;
+            pstCodecCtx->height = nHeight;
+            pstCodecCtx->pix_fmt = PIX_FMT_YUV420P;
+
+            avpicture_fill( (AVPicture *) &stPicture, NULL, PIX_FMT_RGB32, pstCodecCtx->width, pstCodecCtx->height );
+        }
+
+        stPacket.size = nSize;
+        stPacket.data = puszDataFrameBuf;
+
+        while (stPacket.size > 0)
+        {
+            if ( (nLen = avcodec_decode_video2(pstCodecCtx, pstFrame, &nFrameFinished, &stPacket)) < 0 )
+            {
+                g_printerr("avcodec_decode_video2() failed.");
+                g_message("avcodec_decode_video2() failed.");
+                exit(1);
+            }
+
+            if (nFrameFinished)
+            {
+                if (puszRgbData)
+                {
+                    free(puszRgbData);
+                    puszRgbData = NULL;
+                }
+
+                puszRgbData = malloc(pstCodecCtx->width * pstCodecCtx->height * 4);
+                stPicture.data[0] = puszRgbData;
+
+
+                /* Convert the image from its native format to RGB */
+                pstSwsCtx = sws_getContext(pstCodecCtx->width, pstCodecCtx->height, pstCodecCtx->pix_fmt, pstCodecCtx->width, pstCodecCtx->height, PIX_FMT_RGB32, SWS_BICUBIC, NULL, NULL, NULL);
+
+                if (pstSwsCtx == NULL)
+                {
+                    g_printerr("sws_getContext() failed.");
+                    g_message("sws_getContext() failed.");
+                    exit(0);
+                }
+
+                sws_scale(pstSwsCtx, (const uint8_t * const*) pstFrame->data, pstFrame->linesize, 0, pstFrame->height, stPicture.data, stPicture.linesize);
+                sws_freeContext(pstSwsCtx);
+
+
+                surface = find_surface(c, 0);
+
+                if (surface && surface->canvas)
+                {
+                    assert(surface);
+                    assert(surface->canvas);
+
+                    dest.left = dest.top = 0;
+                    dest.right = pstCodecCtx->width;
+                    dest.bottom = pstCodecCtx->height;
+
+                    c->stStreamRenderCtx.nRgbStride = stPicture.linesize[0];
+                    c->stStreamRenderCtx.channel = channel;
+                    c->stStreamRenderCtx.dest = dest;
+
+                    /* if finish request is detected, then don't go wait condition with redering frame. */
+                    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+                    if ( (c->stStreamRenderCtx.nStatus == STREAM_RENDER_PAUSE_REQ) ||
+                        (c->stStreamRenderCtx.nStatus == STREAM_RENDER_FIN_REQ) )
+                    {
+                        g_message("received PAUSE_REQ or FIN_REQ, skipping rendering in encoding thread");
+
+                        g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+                        break;
+                    }
+
+                    c->stStreamRenderCtx.pData = stPicture.data[0];
+
+                    g_idle_add( (GSourceFunc) DisplayStreamRenderFrame, &c->stStreamRenderCtx);
+
+                    while (c->stStreamRenderCtx.pData != 0)
+                    {
+                        g_cond_wait( &c->stStreamRenderCtx.stCond, &c->stStreamRenderCtx.stMutex );
+                    }
+
+                    g_mutex_unlock(&c->stStreamRenderCtx.stMutex);
+                }
+                else
+                {
+                    g_printerr("!! error primary screen is not detected !!!");
+                }
+            }
+
+            stPacket.size -= nLen;
+            stPacket.data += nLen;
+        }
+
+        stPacket.data = NULL;
+        stPacket.size = 0;
+
+    } while(1);
+
+    if (puszRgbData)
+    {
+        free(puszRgbData);
+    }
+
+    av_free_packet( &stPacket );
+    av_free(pstFrame);
+    avcodec_close(pstCodecCtx);
+
+#ifdef G_OS_WIN32
+    closesocket(nSock);
+#else
+    close(nSock);
+#endif
+
+    c->stStreamRenderCtx.pstThread = 0;
+
+    return 0;
+}
+
+
+/*
+ * Description : StreamRender thread join
+ * Date        : 20180329
+ */
+static void JoinStreamRenderThread(GObject *object)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(object)->priv;
+
+
+    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+    while ( (c->stStreamRenderCtx.pstThread != 0) &&
+        (c->stStreamRenderCtx.nStatus != STREAM_RENDER_START) &&
+        (c->stStreamRenderCtx.nStatus != STREAM_RENDER_FIN_RSP) )
+    {
+        g_message("send FIN_REQ, wait for FIN_RSP of encoding thread from spice_display_channel_reset coroutine");
+
+#ifdef G_OS_WIN32
+        closesocket(c->stStreamRenderCtx.nSock);
+#else
+        close(c->stStreamRenderCtx.nSock);
+#endif
+        c->stStreamRenderCtx.nSock = -1;
+
+        c->stStreamRenderCtx.nStatus = STREAM_RENDER_FIN_REQ;
+        c->stStreamRenderCtx.pData = 0;
+
+        g_cond_signal( &c->stStreamRenderCtx.stCond );
+        g_cond_wait( &c->stStreamRenderCtx.stCond, &c->stStreamRenderCtx.stMutex );
+    }
+
+    if (c->stStreamRenderCtx.nStatus == STREAM_RENDER_START)
+    {
+        c->stStreamRenderCtx.nStatus = STREAM_RENDER_FIN_REQ;
+    }
+
+    g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+    while (c->stStreamRenderCtx.pstThread > (GThread *) 0)
+    {
+        usleep(20 * 1000);
+    }
+}
+
+
+/*
+ * Description : StreamRender config set
+ * Date        : 20180329
+ */
+static void SetStreamRenderConfig(SpiceChannel *channel)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    SpiceSession *session = spice_channel_get_session(channel);
+    SpiceSessionPrivate *s = session->priv;
+
+    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+    ReadSpiceStreamConfig();
+
+    c->stStreamRenderCtx.nStreamPort = atoi(spice_session_get_streamport(session));
+    c->stStreamRenderCtx.nStreamOnMovieDetection = atoi(spice_session_get_streamonmoviedetection(session));
+    c->stStreamRenderCtx.nOnVariationCapture = atoi(spice_session_get_onvariationcapture(session));
+    c->stStreamRenderCtx.nMaxSamplingFps = atoi(spice_session_get_maxsamplingfps(session));
+    c->stStreamRenderCtx.nAudioSyncNot = atoi(spice_session_get_audiosyncnot(session));
+
+    g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+    g_message("set stream_render_context as a spice_stream.config file.");
+    g_message("stream_port             : [ %d ]", c->stStreamRenderCtx.nStreamPort);
+    g_message("stream_onMovieDetection : [ %d ]", c->stStreamRenderCtx.nStreamOnMovieDetection);
+    g_message("on_variation_capture    : [ %d ]", c->stStreamRenderCtx.nOnVariationCapture);
+    g_message("max_sampling_fps        : [ %d ]", c->stStreamRenderCtx.nMaxSamplingFps);
+    g_message("audio_sync_not          : [ %d ]", c->stStreamRenderCtx.nAudioSyncNot);
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static int ProcessPauseFinRequest(SpiceChannel *channel)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+
+
+    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+    if (c->stStreamRenderCtx.nStatus == STREAM_RENDER_FIN_REQ)
+    {
+        g_message("received FIN_REQ, set FIN_RSP and finish in encoding thread");
+
+        c->stStreamRenderCtx.nStatus = STREAM_RENDER_FIN_RSP;
+
+        g_cond_signal( &c->stStreamRenderCtx.stCond );
+
+        g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+        return -1;
+    }
+
+    while ( (c->stStreamRenderCtx.nStatus == STREAM_RENDER_PAUSE_REQ) ||
+        (c->stStreamRenderCtx.nStatus == STREAM_RENDER_PAUSE_RSP) )
+    {
+        g_message("received PAUSE_REQ, set PAUSE_RSP and condition_wait in encoding thread");
+
+        c->stStreamRenderCtx.nStatus = STREAM_RENDER_PAUSE_RSP;
+
+        g_cond_signal( &c->stStreamRenderCtx.stCond );
+
+        g_cond_wait( &c->stStreamRenderCtx.stCond, &c->stStreamRenderCtx.stMutex );
+    }
+
+    c->stStreamRenderCtx.nStatus = STREAM_RENDER_RUN_RSP;
+
+    g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+    return 0;
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static gboolean StreamFrameSchedule(SpiceChannel *channel)
+{
+    SpiceSession *session = spice_channel_get_session(channel);
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    SpiceMsgDisplayStreamFrameData *op;
+    SpiceMsgIn *in;
+    guint32 mmtime = 0;
+    guint32 audio_delay = 0;
+    int32_t latency = 0;
+    gboolean invalid_mm_time;
+
+
+    if (c->stStreamRenderCtx.unTimeoutId)
+    {
+        return TRUE;
+    }
+
+    if ( (in = g_queue_peek_head(c->stStreamRenderCtx.pstLatencyQueue)) == NULL )
+    {
+        return TRUE;
+    }
+
+    op = spice_msg_in_parsed(in);
+
+    mmtime = spice_session_get_mm_time(session, &invalid_mm_time);
+
+    if (spice_session_is_playback_active(session))
+    {
+        audio_delay = spice_session_get_playback_latency(session);
+    }
+
+    latency = op->unMultiMediaTime - mmtime;
+
+
+    if (audio_delay > 0)
+    {
+        latency = op->unMultiMediaTime + 400 + 15 - audio_delay - mmtime + 80;
+    }
+
+    if (latency < 0)
+    {
+        if (audio_delay > 0)
+        {
+            g_message("video stream data too late by %d ms (ts: %u, session-mmtime: %u, audio_delay:%u)",
+                latency * (-1), op->unMultiMediaTime, mmtime, audio_delay);
+        }
+
+        latency = 0;
+    }
+
+    //g_message("StreamFrameSchedule() video latency: %d", latency); 
+    CHANNEL_DEBUG(channel, "video latency: %d", latency);
+
+    c->stStreamRenderCtx.unTimeoutId = g_timeout_add(latency, (GSourceFunc) StreamFrameDataMoveIntoMsgq, channel);
+
+    return TRUE;
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static gboolean StreamFrameDataMoveIntoMsgq(SpiceChannel *channel)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    SpiceMsgIn *in;
+
+
+    c->stStreamRenderCtx.unTimeoutId = 0;
+
+    if ( (in = g_queue_pop_head(c->stStreamRenderCtx.pstLatencyQueue)) != NULL )
+    {
+        SendStreamFrameDataToDecoder(channel, in);
+
+        spice_msg_in_unref(in);
+
+        StreamFrameSchedule(channel);
+    }
+
+    return FALSE;
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static void SendStreamFrameDataToDecoder(SpiceChannel *channel, SpiceMsgIn *in)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+
+
+    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+    spice_msg_in_ref(in);
+
+    g_queue_push_tail(c->stStreamRenderCtx.pstMsgQueue, in);
+
+    g_cond_signal( &c->stStreamRenderCtx.stCond );
+
+    g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static void ResetStreamFrameSchedule(SpiceChannel *channel)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+
+
+    if (c->stStreamRenderCtx.unTimeoutId != 0)
+    {
+        g_source_remove(c->stStreamRenderCtx.unTimeoutId);
+        c->stStreamRenderCtx.unTimeoutId = 0;
+    }
+
+    g_queue_foreach(c->stStreamRenderCtx.pstLatencyQueue, MsgInUnrefFuncGpointer, NULL);
+    g_queue_clear(c->stStreamRenderCtx.pstLatencyQueue);
+
+    c->stStreamRenderCtx.unSequenceNum = 0;
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static gboolean DisplayStreamRenderFrame(STREAM_RENDER_CONTEXT_T *pstStreamRenderCtx)
+{
+    SpiceChannel *channel = pstStreamRenderCtx->channel;
+    SpiceDisplayChannelPrivate *c = NULL;
+    SpiceRect dest = pstStreamRenderCtx->dest;
+    display_surface *surface = NULL;
+
+
+    assert(channel);
+
+    c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+
+    assert(c);
+
+
+    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+    if (pstStreamRenderCtx->pData == 0)
+    {
+        g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+        goto done;
+    }
+
+    g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+    surface = find_surface(c, 0);
+
+    if (surface && surface->canvas)
+    {
+        surface->canvas->ops->put_image(surface->canvas,
+#ifdef G_OS_WIN32
+            c->dc,
+#endif
+            &dest, pstStreamRenderCtx->pData,
+            dest.right, dest.bottom,
+            pstStreamRenderCtx->nRgbStride, NULL);
+    }
+
+    g_signal_emit(channel, signals[SPICE_DISPLAY_INVALIDATE], 0, dest.left, dest.top, dest.right - dest.left, dest.bottom - dest.top);
+
+done:
+    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+    pstStreamRenderCtx->pData = 0;
+
+    g_cond_signal( &pstStreamRenderCtx->stCond );
+
+    g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+    return G_SOURCE_REMOVE;
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static uint32_t DisplayChannelGetDecodingQueueSize(SpiceChannel *channel)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    int q_size = 0;
+    int latency_q_size = 0;
+
+
+    if ( !(c->stStreamRenderCtx.pstMsgQueue) )
+    {
+        return 0;
+    }
+
+    g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+    q_size = g_queue_get_length(c->stStreamRenderCtx.pstMsgQueue);
+
+    g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+    latency_q_size = g_queue_get_length(c->stStreamRenderCtx.pstLatencyQueue);
+
+    return q_size + latency_q_size;
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static int ReadEncodedFrame(SpiceChannel *channel, char *recvHeaderbuf, char *dataFramebuf)
+{
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    ENCODER_HEADER_T *header = (ENCODER_HEADER_T *) recvHeaderbuf;
+    SpiceMsgIn *in;
+    SpiceMsgDisplayStreamFrameData *op;
+    int nLeft = 0;
+    int nRecv = 0;
+    int nRet = 0;
+    int private_header_read_flag = 0;
+    int nSize = 0;
+
+    if (c->stStreamRenderCtx.nUse)
+    {
+        g_mutex_lock( &c->stStreamRenderCtx.stMutex );
+
+        while ( (g_queue_get_length(c->stStreamRenderCtx.pstMsgQueue) == 0) &&
+            (c->stStreamRenderCtx.nStatus != STREAM_RENDER_FIN_REQ) )
+        {
+            if (c->stStreamRenderCtx.nStatus == STREAM_RENDER_PAUSE_REQ)
+            {
+                c->stStreamRenderCtx.nStatus = STREAM_RENDER_PAUSE_RSP;
+
+                g_cond_signal( &c->stStreamRenderCtx.stCond );
+            }
+
+            g_cond_wait( &c->stStreamRenderCtx.stCond, &c->stStreamRenderCtx.stMutex );
+        }
+
+        if (c->stStreamRenderCtx.nStatus == STREAM_RENDER_FIN_REQ)
+        {
+            g_message("received FIN_REQ, set FIN_RSP and finish in encoding thread");
+
+            c->stStreamRenderCtx.nStatus = STREAM_RENDER_FIN_RSP;
+
+            g_cond_signal( &c->stStreamRenderCtx.stCond );
+
+            g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+            return -1;
+        }
+
+        in = g_queue_pop_head(c->stStreamRenderCtx.pstMsgQueue);
+
+        g_mutex_unlock( &c->stStreamRenderCtx.stMutex );
+
+        op = spice_msg_in_parsed(in);
+
+        memcpy(recvHeaderbuf, op->uszData, sizeof(ENCODER_HEADER_T));
+
+        if (header->unCodecPrivateHeaderSize > 0)
+        {
+            memcpy(recvHeaderbuf + sizeof(ENCODER_HEADER_T), op->uszData + sizeof(ENCODER_HEADER_T), header->unCodecPrivateHeaderSize);
+        }
+
+        memcpy(dataFramebuf, op->uszData + sizeof(ENCODER_HEADER_T) + header->unCodecPrivateHeaderSize, header->unDataSize);
+
+        assert(op->unDataSize == sizeof(ENCODER_HEADER_T) + header->unCodecPrivateHeaderSize + header->unDataSize);
+
+        g_idle_add( (GSourceFunc) MsgInUnrefFuncSpiceMsgIn, in );
+    }
+    else
+    {
+        nLeft = sizeof(ENCODER_HEADER_T);
+        nRecv = nRet = private_header_read_flag = 0;
+
+        while (nLeft > 0)
+        {
+            if ( (nRet = RecvDataFromSocket(c->stStreamRenderCtx.nSock, (char *) recvHeaderbuf + nRecv, nLeft)) < 0 )
+            {
+                g_printerr("connection read fail");
+                return -1;
+            }
+
+            nLeft -= nRet;
+            nRecv += nRet;
+
+            if (nLeft == 0 && !private_header_read_flag && header->unCodecPrivateHeaderSize > 0)
+            {
+                nLeft = header->unCodecPrivateHeaderSize;
+                private_header_read_flag = 1;
+            }
+        }
+
+        nSize = header->unDataSize;
+
+        if (header->unTotalSize != header->unHeaderSize + header->unDataSize)
+        {
+            g_printerr("header value is not valid. you may be connecting wrong stream port. check config");
+        }
+
+        assert(header->unTotalSize == header->unHeaderSize + header->unDataSize);
+        assert(header->unHeaderSize == sizeof(ENCODER_HEADER_T) + header->unCodecPrivateHeaderSize);
+
+        nLeft = nSize;
+        nRecv = 0;
+
+        if ( (nRet = RecvDataFromSocket(c->stStreamRenderCtx.nSock, (char *) dataFramebuf + nRecv, nLeft)) < 0 )
+        {
+            g_printerr("connection read fail");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static void MsgInUnrefFuncGpointer(gpointer data, gpointer user_data)
+{
+    spice_msg_in_unref(data);
+}
+
+
+/*
+ * Description : 동영상 가속기
+ * Date        : 20180329
+ */
+static gboolean MsgInUnrefFuncSpiceMsgIn(SpiceMsgIn *in)
+{
+    spice_msg_in_unref(in);
+
+    return FALSE;
+}
+
+
+/*
+ * Description : socket 생성
+ * Date        : 20180329
+ */
+int GetStreamRenderSocket(SpiceChannel *channel)
+{
+    SpiceSession *session = spice_channel_get_session(channel);
+    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+    char g_spice_ip[120];
+    int g_spice_port = 0;
+    struct sockaddr_in serv_addr;
+    int sockFD = 0;
+    int stream_port = 0;
+    char szTemp[ 1024 ];
+    char *session_host = NULL;
+    char *s_port = NULL;
+    char *s_tls_port = NULL;
+    GStrv s_secure_channels = NULL;
+    const char *name = NULL;
+    gchar *port = NULL;
+    gchar *endptr = NULL;
+    gboolean use_tls = FALSE;
+
+
+    if ( (sockFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
+    {   
+        g_printerr("Could not create socket");
+    }
+
+    memset(&serv_addr, 0x00, sizeof(serv_addr));
+
+
+    g_object_get(session,
+                 "host", &session_host,
+                 "port", &s_port,
+                 "secure-channels", &s_secure_channels,
+                 "tls-port", &s_tls_port,
+                 NULL);
+
+    g_message("main channel's ip:%s, port:%s", session_host, s_port);
+    strcpy(g_spice_ip, session_host);
+
+
+    name = spice_channel_type_to_string(channel->priv->channel_type);
+
+    if (spice_strv_contains(s_secure_channels, "all") || spice_strv_contains(s_secure_channels, name))
+    {
+        use_tls = TRUE;
+    }
+
+    if (use_tls)
+    {
+        g_message("%s channel is to use tls", name);
+    }
+
+    if (s_port == NULL)
+    {
+        use_tls = TRUE;
+    }
+
+    port = use_tls ? s_tls_port : s_port;
+    port = (s_tls_port != NULL ? s_tls_port : s_port);
+
+    if (port == NULL)
+    {
+        g_printerr("main port or tls_port that is used is NULL");
+        return -1;
+    }
+
+    stream_port = strtol(port, &endptr, 10);
+
+    if (stream_port == 0 && s_port != NULL)
+    {
+        port = s_port;
+
+        stream_port = strtol(port, &endptr, 10);
+    }
+
+    if (*port == '\0' || *endptr != '\0' || stream_port <= 0 || stream_port > G_MAXUINT16)
+    {
+        g_printerr("Invalid stream port value %d", stream_port);
+        return -1;
+    }
+
+
+    if (c->stStreamRenderCtx.nStreamPort > 1000)
+    {
+        g_spice_port = c->stStreamRenderCtx.nStreamPort;
+    }
+    else
+    {
+        g_spice_port = stream_port + c->stStreamRenderCtx.nStreamPort;
+    }
+
+    g_message("spice ip:%s, stream port:%d", g_spice_ip, g_spice_port);
+
+
+    if (strcmp(g_spice_ip, "localhost") == 0)
+    {
+        sprintf(g_spice_ip, "127.0.0.1");
+    }
+
+    serv_addr.sin_addr.s_addr = inet_addr(g_spice_ip);
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(g_spice_port);
+
+    if (connect(sockFD, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
+    {
+        g_printerr("Error : Connect Failed. at connecting to server with port %d", g_spice_port);
+        return -1;
+    }
+
+    g_message("Connection completed");
+
+    memset(szTemp, 0x00, sizeof(szTemp));
+
+    sprintf(szTemp, "stream_port=%d\nstream_onMovieDetection=%d\non_variation_capture=%d\nmax_sampling_fps=%d\n",
+        c->stStreamRenderCtx.nStreamPort, c->stStreamRenderCtx.nStreamOnMovieDetection,
+        c->stStreamRenderCtx.nOnVariationCapture, c->stStreamRenderCtx.nMaxSamplingFps);
+
+    if (SendDataToSocket(sockFD, szTemp, strlen(szTemp)) < 0)
+    {
+        g_printerr("error at sending token");
+        exit(-1);
+    }
+
+    return sockFD;
+}
+
+
+/*
+ * Description : data send
+ * Date        : 20180329
+ */
+int SendDataToSocket(int nSock, void *pData, int nLength)
+{
+    int nSize = nLength;
+    int nRet = 0;
+
+
+    while (nSize > 0)
+    {
+        nRet = send(nSock, (char *) pData + (nLength - nSize), nSize, 0);
+
+        if ( nRet < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) )
+        {
+            continue;
+        }
+
+        if (nRet < 0)
+        {
+            return nRet;
+        }
+
+        nSize -= nRet;
+    }
+
+    return nLength;
+}
+
+
+/*
+ * Description : data receive
+ * Date        : 20180329
+ */
+int RecvDataFromSocket(int nSock, void *pData, int nLength)
+{
+    int nSize = nLength;
+    int nRet = 0;
+
+
+    while (nSize > 0)
+    {
+        nRet = recv(nSock, (char *)pData + (nLength - nSize), nSize, 0);
+
+        if ( nRet < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) )
+        {
+            continue;
+        }
+
+        if (nRet < 0)
+        {
+            return nRet;
+        }
+
+        nSize -= nRet;
+    }
+
+    return nLength;
+}
+
+
+#endif
+

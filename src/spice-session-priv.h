@@ -54,8 +54,8 @@ GSocketConnection* spice_session_channel_open_host(SpiceSession *session, SpiceC
 void spice_session_channel_new(SpiceSession *session, SpiceChannel *channel);
 void spice_session_channel_migrate(SpiceSession *session, SpiceChannel *channel);
 
-void spice_session_set_mm_time(SpiceSession *session, guint32 time);
-guint32 spice_session_get_mm_time(SpiceSession *session);
+void spice_session_set_mm_time(SpiceSession *session, guint32 time, gboolean invalid_time);
+guint32 spice_session_get_mm_time(SpiceSession *session, gboolean* invalid_time);
 
 void spice_session_switching_disconnect(SpiceSession *session);
 void spice_session_start_migrating(SpiceSession *session,
@@ -67,6 +67,13 @@ void spice_session_set_port(SpiceSession *session, int port, gboolean tls);
 void spice_session_get_pubkey(SpiceSession *session, guint8 **pubkey, guint *size);
 guint spice_session_get_verify(SpiceSession *session);
 const gchar* spice_session_get_username(SpiceSession *session);
+//add ffmpeg
+const gchar* spice_session_get_streamport(SpiceSession *session);
+const gchar* spice_session_get_streamonmoviedetection(SpiceSession *session);
+const gchar* spice_session_get_onvariationcapture(SpiceSession *session);
+const gchar* spice_session_get_maxsamplingfps(SpiceSession *session);
+const gchar* spice_session_get_audiosyncnot(SpiceSession *session);
+//end 
 const gchar* spice_session_get_password(SpiceSession *session);
 const gchar* spice_session_get_host(SpiceSession *session);
 const gchar* spice_session_get_cert_subject(SpiceSession *session);

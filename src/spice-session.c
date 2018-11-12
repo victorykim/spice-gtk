@@ -63,7 +63,13 @@ struct _SpiceSessionPrivate {
     SpiceURI          *proxy;
     gchar             *shared_dir;
     gboolean          share_dir_ro;
-
+//add ffmpeg setting values
+    char              *nStreamPort;
+    char              *nStreamOnMovieDetection;
+    char              *nOnVariationCapture;
+    char              *nMaxSamplingFps;
+    char              *nAudioSyncNot;
+//end
     /* whether to enable audio */
     gboolean          audio;
 
@@ -98,6 +104,7 @@ struct _SpiceSessionPrivate {
     SpiceChannel      *cmain; /* weak reference */
     Ring              channels;
     guint32           mm_time;
+    gboolean          invalid_mm_time;
     gboolean          client_provided_sockets;
     guint64           mm_time_at_clock;
     SpiceSession      *migration;
@@ -216,6 +223,13 @@ enum {
     PROP_REDIR_RPORTS,
     PROP_REDIR_LPORTS,
     PROP_INACTIVITY_TIMEOUT,
+//add ffmpeg
+    PROP_STREAMPORT,
+    PROP_STREAMONMOVIEDETECTION,
+    PROP_ONVARIATIONCAPTURE,
+    PROP_MAXSAMPLINGFPS,
+    PROP_AUDIOSYNCNOT,
+//end
 };
 
 /* signals */
@@ -385,6 +399,14 @@ spice_session_finalize(GObject *gobject)
     g_free(s->shared_dir);
     g_strfreev(s->redirected_rports);
     g_strfreev(s->redirected_lports);
+
+//add ffmpeg
+    g_free(s->nStreamPort);
+    g_free(s->nStreamOnMovieDetection);
+    g_free(s->nOnVariationCapture);
+    g_free(s->nMaxSamplingFps);
+    g_free(s->nAudioSyncNot);
+//end
 
     g_clear_pointer(&s->images, cache_unref);
     glz_decoder_window_destroy(s->glz_window);
@@ -557,7 +579,8 @@ static int spice_parse_uri(SpiceSession *session, const char *original_uri)
         } else if (g_str_equal(key, "password")) {
             target_key = &password;
             g_warning("password may be visible in process listings");
-        } else {
+        }
+          else {
             g_warning("unknown key in spice URI parsing: '%s'", key);
             goto fail;
         }
@@ -586,6 +609,7 @@ end:
     g_free(s->ws_port);
     g_free(s->username);
     g_free(s->password);
+
     s->unix_path = g_strdup(path);
     s->host = host;
     s->port = port;
@@ -604,6 +628,7 @@ fail:
     g_free(ws_port);
     g_free(username);
     g_free(password);
+
     return -1;
 }
 
@@ -730,6 +755,25 @@ static void spice_session_get_property(GObject    *gobject,
     case PROP_INACTIVITY_TIMEOUT:
         g_value_set_int(value, s->inactivity_timeout);
         break;
+//add ffmpeg
+    case PROP_STREAMPORT:
+        g_value_set_string(value, s->nStreamPort);
+        break;
+    case PROP_STREAMONMOVIEDETECTION:
+        g_value_set_string(value, s->nStreamOnMovieDetection);
+        break;
+    case PROP_ONVARIATIONCAPTURE:
+        g_value_set_string(value, s->nOnVariationCapture);
+        break;
+    case PROP_MAXSAMPLINGFPS:
+        g_value_set_string(value, s->nMaxSamplingFps);
+        break;
+    case PROP_AUDIOSYNCNOT:
+        g_value_set_string(value, s->nAudioSyncNot);
+        break;
+//end
+
+
     default:
 	G_OBJECT_WARN_INVALID_PROPERTY_ID(gobject, prop_id, pspec);
 	break;
@@ -884,6 +928,28 @@ static void spice_session_set_property(GObject      *gobject,
     case PROP_INACTIVITY_TIMEOUT:
         s->inactivity_timeout = g_value_get_int(value);
         break;
+//add ffmpeg
+    case PROP_STREAMPORT:
+         g_free(s->nStreamPort);
+         s->nStreamPort = g_value_dup_string(value);
+         break;
+    case PROP_STREAMONMOVIEDETECTION:
+         g_free(s->nStreamOnMovieDetection);
+         s->nStreamOnMovieDetection = g_value_dup_string(value);
+         break;
+    case PROP_ONVARIATIONCAPTURE:
+         g_free(s->nOnVariationCapture);
+         s->nOnVariationCapture = g_value_dup_string(value);
+         break;
+    case PROP_MAXSAMPLINGFPS:
+         g_free(s->nMaxSamplingFps);
+         s->nMaxSamplingFps = g_value_dup_string(value);
+         break;
+    case PROP_AUDIOSYNCNOT:
+         g_free(s->nAudioSyncNot);
+         s->nAudioSyncNot = g_value_dup_string(value);
+         break;
+//end
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(gobject, prop_id, pspec);
         break;
@@ -1025,6 +1091,56 @@ static void spice_session_class_init(SpiceSessionClass *klass)
                              NULL,
                              G_PARAM_READWRITE |
                              G_PARAM_STATIC_STRINGS));
+//add ffmpeg
+/**
+     * SpiceSession:maxsamplingfps:
+     *
+     * max sampling fps
+     *
+     *
+     **/
+    g_object_class_install_property
+        (gobject_class, PROP_STREAMPORT,
+         g_param_spec_string("nStreamPort",
+                             "nStreamPort",
+                             "nStreamPort",
+                             NULL,
+                             G_PARAM_READWRITE |
+                             G_PARAM_STATIC_STRINGS));
+    g_object_class_install_property
+        (gobject_class, PROP_STREAMONMOVIEDETECTION,
+         g_param_spec_string("nStreamOnMovieDetection",
+                             "nStreamOnMovieDetection",
+                             "nStreamOnMovieDetection",
+                             NULL,
+                             G_PARAM_READWRITE |
+                             G_PARAM_STATIC_STRINGS));
+    g_object_class_install_property
+        (gobject_class, PROP_ONVARIATIONCAPTURE,
+         g_param_spec_string("nOnVariationCapture",
+                             "nOnVariationCapture",
+                             "nOnVariationCapture",
+                             NULL,
+                             G_PARAM_READWRITE |
+                             G_PARAM_STATIC_STRINGS));
+    g_object_class_install_property
+        (gobject_class, PROP_MAXSAMPLINGFPS,
+         g_param_spec_string("nMaxSamplingFps",
+                             "nMaxSamplingFps",
+                             "nMaxSamplingFps",
+                             NULL,
+                             G_PARAM_READWRITE |
+                             G_PARAM_STATIC_STRINGS));
+    g_object_class_install_property
+        (gobject_class, PROP_AUDIOSYNCNOT,
+         g_param_spec_string("nAudioSyncNot",
+                             "nAudioSyncNot",
+                             "nAudioSyncNot",
+                             NULL,
+                             G_PARAM_READWRITE |
+                             G_PARAM_STATIC_STRINGS));
+
+//end
 
     /**
      * SpiceSession:ciphers:
@@ -1633,6 +1749,14 @@ SpiceSession *spice_session_new_from_session(SpiceSession *session)
     g_warn_if_fail(c->pubkey == NULL);
     g_warn_if_fail(c->pubkey == NULL);
     g_warn_if_fail(c->proxy == NULL);
+//add ffmpeg
+    g_warn_if_fail(c->nStreamPort == NULL);
+    g_warn_if_fail(c->nStreamOnMovieDetection == NULL);
+    g_warn_if_fail(c->nOnVariationCapture == NULL);
+    g_warn_if_fail(c->nMaxSamplingFps == NULL);
+    g_warn_if_fail(c->nAudioSyncNot == NULL);
+//end
+
 
     g_object_get(session,
                  "host", &c->host,
@@ -1652,6 +1776,13 @@ SpiceSession *spice_session_new_from_session(SpiceSession *session)
                  "enable-audio", &c->audio,
                  "enable-usbredir", &c->usbredir,
                  "ca", &c->ca,
+//add ffmpeg
+                 "nStreamPort", &c->nStreamPort,
+                 "nStreamOnMovieDetection", &c->nStreamOnMovieDetection,
+                 "nOnVariationCapture", &c->nOnVariationCapture,
+                 "nMaxSamplingFps", &c->nMaxSamplingFps,
+                 "nAudioSyncNot", &c->nAudioSyncNot,
+//end
                  NULL);
 
     c->client_provided_sockets = s->client_provided_sockets;
@@ -1674,8 +1805,9 @@ SpiceSession *spice_session_new_from_session(SpiceSession *session)
  **/
 gboolean spice_session_connect(SpiceSession *session)
 {
-    SpiceSessionPrivate *s;
 
+    SpiceSessionPrivate *s;
+    g_message("gtk %s", __FUNCTION__);
     g_return_val_if_fail(SPICE_IS_SESSION(session), FALSE);
 
     s = session->priv;
@@ -2433,11 +2565,13 @@ int spice_session_get_connection_id(SpiceSession *session)
 }
 
 G_GNUC_INTERNAL
-guint32 spice_session_get_mm_time(SpiceSession *session)
+guint32 spice_session_get_mm_time(SpiceSession *session, gboolean* invalid_time)
 {
     g_return_val_if_fail(SPICE_IS_SESSION(session), 0);
 
-    SpiceSessionPrivate *s = session->priv;
+   SpiceSessionPrivate *s = session->priv;
+    if (invalid_time)
+        *invalid_time = s->invalid_mm_time;
 
     /* FIXME: we may want to estimate the drift of clocks, and well,
        do something better than this trivial approach */
@@ -2447,18 +2581,19 @@ guint32 spice_session_get_mm_time(SpiceSession *session)
 #define MM_TIME_DIFF_RESET_THRESH 500 // 0.5 sec
 
 G_GNUC_INTERNAL
-void spice_session_set_mm_time(SpiceSession *session, guint32 time)
+void spice_session_set_mm_time(SpiceSession *session, guint32 time, gboolean invalid_time)
 {
     g_return_if_fail(SPICE_IS_SESSION(session));
 
     SpiceSessionPrivate *s = session->priv;
     guint32 old_time;
 
-    old_time = spice_session_get_mm_time(session);
+    old_time = spice_session_get_mm_time(session, NULL);
 
     s->mm_time = time;
+    s->invalid_mm_time = invalid_time;
     s->mm_time_at_clock = g_get_monotonic_time();
-    SPICE_DEBUG("set mm time: %u", spice_session_get_mm_time(session));
+    SPICE_DEBUG("set mm time: %u", spice_session_get_mm_time(session, NULL));
     if (time > old_time + MM_TIME_DIFF_RESET_THRESH ||
         time < old_time) {
         SPICE_DEBUG("%s: mm-time-reset, old %u, new %u", __FUNCTION__, old_time, s->mm_time);
@@ -2539,6 +2674,59 @@ const gchar* spice_session_get_username(SpiceSession *session)
 
     return s->username;
 }
+
+//add ffmpeg
+G_GNUC_INTERNAL
+const gchar* spice_session_get_streamport(SpiceSession *session)
+{
+
+    g_return_val_if_fail(SPICE_IS_SESSION(session), NULL);
+
+    SpiceSessionPrivate *s = session->priv;
+
+    return s->nStreamPort;
+}
+
+G_GNUC_INTERNAL
+const gchar* spice_session_get_streamonmoviedetection(SpiceSession *session)
+{
+    g_return_val_if_fail(SPICE_IS_SESSION(session), NULL);
+
+    SpiceSessionPrivate *s = session->priv;
+
+    return s->nStreamOnMovieDetection;
+}
+
+G_GNUC_INTERNAL
+const gchar* spice_session_get_onvariationcapture(SpiceSession *session)
+{
+    g_return_val_if_fail(SPICE_IS_SESSION(session), NULL);
+
+    SpiceSessionPrivate *s = session->priv;
+
+    return s->nOnVariationCapture;
+}
+
+G_GNUC_INTERNAL
+const gchar* spice_session_get_maxsamplingfps(SpiceSession *session)
+{
+    g_return_val_if_fail(SPICE_IS_SESSION(session), NULL);
+
+    SpiceSessionPrivate *s = session->priv;
+
+    return s->nMaxSamplingFps;
+}
+
+G_GNUC_INTERNAL
+const gchar* spice_session_get_audiosyncnot(SpiceSession *session)
+{
+    g_return_val_if_fail(SPICE_IS_SESSION(session), NULL);
+
+    SpiceSessionPrivate *s = session->priv;
+
+    return s->nAudioSyncNot;
+}
+//end
 
 G_GNUC_INTERNAL
 const gchar* spice_session_get_password(SpiceSession *session)
@@ -2699,6 +2887,7 @@ guint32 spice_session_get_playback_latency(SpiceSession *session)
         spice_playback_channel_is_active(s->playback_channel)) {
         return spice_playback_channel_get_latency(s->playback_channel);
     } else {
+        g_message("%s: not implemented when there isn't audio playback", __FUNCTION__);
         SPICE_DEBUG("%s: not implemented when there isn't audio playback", __FUNCTION__);
         return 0;
     }
