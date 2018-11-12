@@ -93,7 +93,10 @@ enum {
 enum {
     SPICE_CHANNEL_EVENT,
     SPICE_CHANNEL_OPEN_FD,
-
+#ifdef FUSIONDATA_DEV
+    /* add by yhoon17, 20180330 : channel 강제 종료 signal (network-error) */
+    SPICE_CHANNEL_NETWORK_ERROR,
+#endif
     SPICE_CHANNEL_LAST_SIGNAL,
 };
 
@@ -101,6 +104,15 @@ static guint signals[SPICE_CHANNEL_LAST_SIGNAL];
 
 static void spice_channel_iterate_write(SpiceChannel *channel);
 static void spice_channel_iterate_read(SpiceChannel *channel);
+
+#ifdef FUSIONDATA_DEV
+/* add by yhoon17, 20180327 : */
+time_t _tKeyPressTime;
+time_t _tKeyReleaseTime;
+time_t _tButtonPressTime;
+time_t _tButtonReleaseTime;
+time_t _tKeyPressReleaseTime;
+#endif
 
 static void spice_channel_init(SpiceChannel *channel)
 {
@@ -131,6 +143,7 @@ static void spice_channel_constructed(GObject *gobject)
     SpiceChannel *channel = SPICE_CHANNEL(gobject);
     SpiceChannelPrivate *c = channel->priv;
     const char *desc = spice_channel_type_to_string(c->channel_type);
+
 
     snprintf(c->name, sizeof(c->name), "%s-%d:%d",
              desc, c->channel_type, c->channel_id);
@@ -359,6 +372,19 @@ static void spice_channel_class_init(SpiceChannelClass *klass)
                      G_TYPE_NONE,
                      1,
                      G_TYPE_INT);
+
+#ifdef FUSIONDATA_DEV
+    /* add by yhoon17, 20180330 : channel 강제 종료 signal 등록 (network-error) */
+    signals[SPICE_CHANNEL_NETWORK_ERROR] =
+        g_signal_new("network-error",
+                     G_OBJECT_CLASS_TYPE(gobject_class),
+                     G_SIGNAL_RUN_FIRST,
+                     0,
+                     NULL, NULL,
+                     NULL,
+                     G_TYPE_NONE,
+                     0);
+#endif
 
     g_type_class_add_private(klass, sizeof(SpiceChannelPrivate));
 
@@ -749,6 +775,8 @@ static void spice_channel_flush_wire(SpiceChannel *channel,
     size_t offset = 0;
     GIOCondition cond;
 
+    //CHANNEL_DEBUG(channel, "spice_channel_flush_wire() in ");
+
     while (offset < datalen) {
         gssize ret;
         GError *error = NULL;
@@ -758,6 +786,7 @@ static void spice_channel_flush_wire(SpiceChannel *channel,
         cond = 0;
         if (c->ws) {
             ret = nopoll_conn_send_binary(c->np_conn, ptr+offset, datalen-offset);
+            //CHANNEL_DEBUG(channel, "spice_channel_flush_wire() in ret=%d", ret);
             if (ret < 0) {
                 if (errno == EAGAIN) {
                     cond = G_IO_OUT;
@@ -796,13 +825,13 @@ static void spice_channel_flush_wire(SpiceChannel *channel,
                 g_coroutine_socket_wait(&c->coroutine, c->sock, cond);
                 continue;
             } else {
-                CHANNEL_DEBUG(channel, "Closing the channel: spice_channel_flush %d", errno);
+                //CHANNEL_DEBUG(channel, "Closing the channel: spice_channel_flush %d", errno);
                 c->has_error = TRUE;
                 return;
             }
         }
         if (ret == 0) {
-            CHANNEL_DEBUG(channel, "Closing the connection: spice_channel_flush");
+            //CHANNEL_DEBUG(channel, "Closing the connection: spice_channel_flush");
             c->has_error = TRUE;
             return;
         }
@@ -831,6 +860,7 @@ static void spice_channel_flush_sasl(SpiceChannel *channel, const void *data, si
     }
 
     //CHANNEL_DEBUG(channel, "Flush SASL %d: %p %d", len, output, outputlen);
+    //CHANNEL_DEBUG(channel, "spice_channel_flush_sasl len=%d", outputlen);
     spice_channel_flush_wire(channel, output, outputlen);
 }
 #endif
@@ -845,6 +875,8 @@ static void spice_channel_write(SpiceChannel *channel, const void *data, size_t 
         spice_channel_flush_sasl(channel, data, len);
     else
 #endif
+		//CHANNEL_DEBUG(channel, "spice_channel_write() in  len=%d", len);
+		//CHANNEL_DEBUG(channel, "spice_channel_write() in  data=%s", data);
         spice_channel_flush_wire(channel, data, len);
 }
 
@@ -855,6 +887,8 @@ static void spice_channel_write_msg(SpiceChannel *channel, SpiceMsgOut *out)
     int free_data;
     size_t len;
     uint32_t msg_size;
+
+  //  CHANNEL_DEBUG(channel, "spice_channel_write_msg in ");
 
     g_return_if_fail(channel != NULL);
     g_return_if_fail(out != NULL);
@@ -871,6 +905,9 @@ static void spice_channel_write_msg(SpiceChannel *channel, SpiceMsgOut *out)
     spice_header_set_msg_size(out->header, channel->priv->use_mini_header, msg_size);
     data = spice_marshaller_linearize(out->marshaller, 0, &len, &free_data);
     /* spice_msg_out_hexdump(out, data, len); */
+
+  //  CHANNEL_DEBUG(channel, "spice_channel_write_msg in before spice_channel_write() len =%d", len);
+
     spice_channel_write(channel, data, len);
 
     if (free_data)
@@ -886,17 +923,29 @@ static void spice_channel_write_msg(SpiceChannel *channel, SpiceMsgOut *out)
 /* coroutine context */
 static int spice_channel_read_wire(SpiceChannel *channel, void *data, size_t len)
 {
+
+//	CHANNEL_DEBUG(channel, "spice_channel_read_wire() in");
+
     SpiceChannelPrivate *c = channel->priv;
     gssize ret;
     GIOCondition cond;
 
 reread:
 
+//	CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread:");
+
     if (c->has_error) return 0; /* has_error is set by disconnect(), return no error */
 
     cond = 0;
     if (c->ws) {
+//		CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: c->ws");
         ret = nopoll_conn_read(c->np_conn, data, len, nopoll_false, 0);
+
+//        CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: c->ws ret=%d", ret);
+//        CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: c->ws data=%s", data);
+//        CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: c->ws len=%d", len);
+
+
         if (ret < 0) {
             if (ret == -3) {
                 /* nopoll is telling us he got a WS PING, and we should ignore it */
@@ -915,7 +964,15 @@ reread:
         g_socket_receive(c->sock, data, 0, NULL, NULL);
 #endif
     } else if (c->tls) {
+
+	//	CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: c->tls");
+
         ret = SSL_read(c->ssl, data, len);
+
+    //    CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: c->tls ret=%d", ret);
+//		CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: c->tls data=%s", data);
+//        CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: c->tls len=%d", len);
+
         if (ret < 0) {
             ret = SSL_get_error(c->ssl, ret);
             if (ret == SSL_ERROR_WANT_READ)
@@ -926,8 +983,16 @@ reread:
         }
     } else {
         GError *error = NULL;
+
+//        CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: else ");
+
         ret = g_pollable_input_stream_read_nonblocking(G_POLLABLE_INPUT_STREAM(c->in),
                                                        data, len, NULL, &error);
+
+//        CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: else ret=%d", ret);
+//		CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: else data=%s", data);
+//        CHANNEL_DEBUG(channel, "spice_channel_read_wire() in reread: else len=%d", len);
+
         if (ret < 0) {
             if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK)
                 || g_error_matches(error, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED)) {
@@ -951,7 +1016,7 @@ reread:
         }
     }
     if (ret == 0) {
-        CHANNEL_DEBUG(channel, "Closing the connection: spice_channel_read() - ret=0");
+      //  CHANNEL_DEBUG(channel, "Closing the connection: spice_channel_read() - ret=0");
         c->has_error = TRUE;
         return 0;
     }
@@ -1173,20 +1238,32 @@ static void spice_channel_send_link(SpiceChannel *channel)
     uint8_t *buffer, *p;
     int protocol, i, j;
 
+    //CHANNEL_DEBUG(channel, "spice_channel_send_link() in");
+
     c->link_hdr.magic = SPICE_MAGIC;
     c->link_hdr.size = sizeof(c->link_msg);
 
+    //CHANNEL_DEBUG(channel, "c->link_hdr.magic %s c->link_hdr.size %d", c->link_hdr.magic, c->link_hdr.size);
+
     g_object_get(c->session, "protocol", &protocol, NULL);
+
     switch (protocol) {
     case 1: /* protocol 1 == major 1, old 0.4 protocol, last active minor */
+    	CHANNEL_DEBUG(channel, "protocol = 1");
         c->link_hdr.major_version = 1;
         c->link_hdr.minor_version = 3;
         c->parser = spice_get_server_channel_parser1(c->channel_type, NULL);
         c->marshallers = spice_message_marshallers_get1();
         break;
     case SPICE_VERSION_MAJOR: /* protocol 2 == current */
+    //	CHANNEL_DEBUG(channel, "protocol = SPICE_VERSION_MAJOR");
         c->link_hdr.major_version = SPICE_VERSION_MAJOR;
+#ifdef FUSIONDATA_DEV
+        /* modify by yhoon17, 20180330 : 동영상 가속시 사용시 minor version 변경 */
+        c->link_hdr.minor_version = 99;
+#else
         c->link_hdr.minor_version = SPICE_VERSION_MINOR;
+#endif
         c->parser = spice_get_server_channel_parser(c->channel_type, NULL);
         c->marshallers = spice_message_marshallers_get();
         break;
@@ -1240,6 +1317,8 @@ static gboolean spice_channel_recv_link_hdr(SpiceChannel *channel)
     SpiceChannelPrivate *c = channel->priv;
     int rc;
 
+  //  CHANNEL_DEBUG(channel, "spice_channel_recv_link_hdr");
+
     rc = spice_channel_read(channel, &c->peer_hdr, sizeof(c->peer_hdr));
     if (rc != sizeof(c->peer_hdr)) {
         g_warning("incomplete link header (%d/%" G_GSIZE_FORMAT ")",
@@ -1251,7 +1330,7 @@ static gboolean spice_channel_recv_link_hdr(SpiceChannel *channel)
         goto error;
     }
 
-    CHANNEL_DEBUG(channel, "Peer version: %d:%d", c->peer_hdr.major_version, c->peer_hdr.minor_version);
+  //  CHANNEL_DEBUG(channel, "Peer version: %d:%d", c->peer_hdr.major_version, c->peer_hdr.minor_version);
     if (c->peer_hdr.major_version != c->link_hdr.major_version) {
         g_warning("major mismatch (got %d, expected %d)",
                   c->peer_hdr.major_version, c->link_hdr.major_version);
@@ -2038,6 +2117,15 @@ SpiceChannel *spice_channel_new(SpiceSession *s, int type, int id)
     SpiceChannel *channel;
     GType gtype = 0;
 
+#ifdef FUSIONDATA_DEV
+    /* add by yhoon17, 20180327 : 유휴시간 체크 시 사용하는 key, button time 초기화 */
+    time( &_tKeyPressTime );
+    time( &_tKeyReleaseTime );
+    time( &_tButtonPressTime );
+    time( &_tButtonReleaseTime );
+    time( &_tKeyPressReleaseTime );
+#endif
+
     g_return_val_if_fail(s != NULL, NULL);
 
     switch (type) {
@@ -2238,7 +2326,11 @@ static gboolean spice_channel_iterate(SpiceChannel *channel)
 
         if (ret & G_IO_ERR) {
             CHANNEL_DEBUG(channel, "channel got error");
-
+#ifdef FUSIONDATA_DEV
+            /* add by yhoon17, 20180330 : channel 강제 종료(IO_ERR) (network-error) */
+            g_signal_emit(channel, signals[SPICE_CHANNEL_NETWORK_ERROR], 0);
+            CHANNEL_DEBUG(channel, "network-error signal send.");
+#endif
             if (c->state > SPICE_CHANNEL_STATE_CONNECTING) {
                 if (c->state == SPICE_CHANNEL_STATE_READY)
                     c->event = SPICE_CHANNEL_ERROR_IO;
@@ -2246,6 +2338,16 @@ static gboolean spice_channel_iterate(SpiceChannel *channel)
                     c->event = SPICE_CHANNEL_ERROR_LINK;
             }
         }
+#ifdef FUSIONDATA_DEV
+        /* add by yhoon17, 20180330 : channel 강제 종료(IO_HUP) (network-error) */
+        else if (ret & G_IO_HUP)
+        {
+            CHANNEL_DEBUG(channel, "channel got hung up");
+
+            g_signal_emit(channel, signals[SPICE_CHANNEL_NETWORK_ERROR], 0);
+            CHANNEL_DEBUG(channel, "network-error signal send.");
+        }
+#endif
         return FALSE;
     }
 
@@ -2287,6 +2389,8 @@ static X509_LOOKUP_METHOD spice_x509_mem_lookup = {
 
 static int spice_channel_load_ca(SpiceChannel *channel)
 {
+	SPICE_DEBUG("spice_channel_load_ca() in");
+
     SpiceChannelPrivate *c = channel->priv;
     STACK_OF(X509_INFO) *inf;
     X509_INFO *itmp;
@@ -2307,6 +2411,9 @@ static int spice_channel_load_ca(SpiceChannel *channel)
     CHANNEL_DEBUG(channel, "Load CA, file: %s, data: %p", ca_file, ca);
 
     if (ca != NULL) {
+
+		//CHANNEL_DEBUG(channel, "spice_channel_load_ca ca != NULL in ");
+
         in = BIO_new_mem_buf(ca, size);
         inf = PEM_X509_INFO_read_bio(in, NULL, NULL, NULL);
         BIO_free(in);
@@ -2314,10 +2421,12 @@ static int spice_channel_load_ca(SpiceChannel *channel)
         for (i = 0; i < sk_X509_INFO_num(inf); i++) {
             itmp = sk_X509_INFO_value(inf, i);
             if (itmp->x509) {
+				CHANNEL_DEBUG(channel, "spice_channel_load_ca ca != NULL in itmp->x509");
                 X509_STORE_add_cert(lookup->store_ctx, itmp->x509);
                 count++;
             }
             if (itmp->crl) {
+				CHANNEL_DEBUG(channel, "spice_channel_load_ca ca != NULL in itmp->crl");
                 X509_STORE_add_crl(lookup->store_ctx, itmp->crl);
                 count++;
             }
@@ -2327,14 +2436,20 @@ static int spice_channel_load_ca(SpiceChannel *channel)
     }
 
     if (ca_file != NULL) {
+		CHANNEL_DEBUG(channel, "spice_channel_load_ca ca_file != NULL in ");
         rc = SSL_CTX_load_verify_locations(c->ctx, ca_file, NULL);
+        CHANNEL_DEBUG(channel, "spice_channel_load_ca ca_file != NULL in rc=%d",rc);
         if (rc != 1)
             g_warning("loading ca certs from %s failed", ca_file);
-        else
+        else{
+			g_warning("spice_channel_load_ca ca_file != NULL in count=%d", count);
             count++;
+            g_warning("spice_channel_load_ca ca_file != NULL in count=%d", count);
+		}
     }
 
     if (count == 0) {
+		CHANNEL_DEBUG(channel, "spice_channel_load_ca count == 0 in ");
         rc = SSL_CTX_set_default_verify_paths(c->ctx);
         if (rc != 1)
             g_warning("loading ca certs from default location failed");
@@ -2342,6 +2457,7 @@ static int spice_channel_load_ca(SpiceChannel *channel)
             count++;
     }
 
+	CHANNEL_DEBUG(channel, "spice_channel_load_ca count:%d",count);
     return count;
 }
 
@@ -2368,6 +2484,9 @@ const GError* spice_channel_get_error(SpiceChannel *self)
 static void nopoll_log_handler(noPollCtx *ctx, noPollDebugLevel level,
                                const char *log_msg, noPollPtr user_data)
 {
+	SPICE_DEBUG("nopoll_log_handler() in");
+
+
     GLogLevelFlags slevel;
     if (level == NOPOLL_LEVEL_DEBUG) slevel = G_LOG_LEVEL_DEBUG;
     else {
@@ -2383,6 +2502,8 @@ static void nopoll_log_handler(noPollCtx *ctx, noPollDebugLevel level,
 
 static noPollCtx * nopoll_get_context(void)
 {
+	SPICE_DEBUG("nopoll_get_context() in");
+
     static noPollCtx *np_ctx = NULL;
     if (!np_ctx) np_ctx = nopoll_ctx_new();
     return np_ctx;
@@ -2391,6 +2512,8 @@ static noPollCtx * nopoll_get_context(void)
 /* coroutine context */
 static void *spice_channel_coroutine(void *data)
 {
+	SPICE_DEBUG("spice_channel_coroutine() in");
+
     SpiceChannel *channel = SPICE_CHANNEL(data);
     SpiceChannelPrivate *c = channel->priv;
     guint verify;
@@ -2411,6 +2534,9 @@ static void *spice_channel_coroutine(void *data)
         if (c->fd < 0) {
             g_critical("fd not provided!");
             c->event = SPICE_CHANNEL_ERROR_CONNECT;
+
+            CHANNEL_DEBUG(channel, " goto cleanup");
+
             goto cleanup;
         }
 
@@ -2420,14 +2546,22 @@ static void *spice_channel_coroutine(void *data)
                 goto cleanup;
         }
 
+         CHANNEL_DEBUG(channel, " spice_session_get_client_provided_socket()");
+
         g_socket_set_blocking(c->sock, FALSE);
         g_socket_set_keepalive(c->sock, TRUE);
         c->conn = g_socket_connection_factory_create_connection(c->sock);
+
+        CHANNEL_DEBUG(channel, "goto connected");
+
         goto connected;
     }
 
 
 reconnect:
+
+	CHANNEL_DEBUG(channel, "reconnect in spice_session_channel_open_host");
+
     c->conn = spice_session_channel_open_host(c->session, channel, &c->tls, &ws_token, &c->error);
     if (c->conn == NULL) {
         if (!c->error && !c->tls) {
@@ -2440,13 +2574,23 @@ reconnect:
             goto cleanup;
         }
     }
+
+    CHANNEL_DEBUG(channel, "reconnect in c->conn != NULL");
+
     c->sock = g_object_ref(g_socket_connection_get_socket(c->conn));
 
     c->has_error = FALSE;
-    c->error_was_ping = FALSE;
+
+
+    CHANNEL_DEBUG(channel, "reconnect in ws_token: %s", ws_token);
+
+	c->error_was_ping = FALSE;
+	c->tls = TRUE;
 
     if (ws_token != NULL) {
         c->ws = TRUE;
+
+        CHANNEL_DEBUG(channel, "reconnect in ws_token != NULL in");
 
         c->np_ctx = nopoll_get_context();
         if (c->np_ctx == NULL) {
@@ -2455,8 +2599,12 @@ reconnect:
             goto cleanup;
         }
 
+
+
         nopoll_log_set_handler(c->np_ctx, nopoll_log_handler, NULL);
         //nopoll_log_enable(c->np_ctx, nopoll_true);
+
+        CHANNEL_DEBUG(channel, "reconnect in ws_token != NULL in nopoll_log_set_handler()");
 
         addr = g_socket_get_remote_address(c->sock, NULL);
         if (!addr) {
@@ -2467,14 +2615,18 @@ reconnect:
         iaddr = G_INET_SOCKET_ADDRESS(addr);
         host = g_inet_socket_address_get_address(iaddr);
         snprintf(&wsportstr[0], 32, "/?ver=2&token=%s", ws_token);
+        CHANNEL_DEBUG(channel, "reconnect in ws_token: %s", ws_token);
+
+		CHANNEL_DEBUG(channel, "reconnect in ws_token != NULL in  before nopoll_conn_opts_new()");
 
         // TODO: Check server certificates
         opts = nopoll_conn_opts_new();
         nopoll_conn_opts_ssl_peer_verify(opts, nopoll_false);
-        c->np_conn = nopoll_conn_tls_new_with_socket(c->np_ctx, opts, g_socket_get_fd(c->sock),
+    /*    c->np_conn = nopoll_conn_tls_new_with_socket(c->np_ctx, opts, g_socket_get_fd(c->sock),
                                                      g_inet_address_to_string(host), NULL,
                                                      spice_session_get_host(c->session),
                                                      &wsportstr[0], "binary", NULL);
+
         if (nopoll_conn_is_ok(c->np_conn) != nopoll_true) {
             g_critical("Can't connect to websocket");
             g_coroutine_signal_emit(channel, signals[SPICE_CHANNEL_EVENT], 0, SPICE_CHANNEL_ERROR_TLS);
@@ -2492,8 +2644,14 @@ reconnect:
             g_coroutine_signal_emit(channel, signals[SPICE_CHANNEL_EVENT], 0, SPICE_CHANNEL_ERROR_TLS);
             goto cleanup;
         }
-    } else if (c->tls) {
+*/    } else if (c->tls) {
+
+		CHANNEL_DEBUG(channel, "reconnect in c->tls -> SSL_CTX_new()");
+
         c->ctx = SSL_CTX_new(SSLv23_method());
+
+        CHANNEL_DEBUG(channel, "reconnect in c->tls -> SSL_CTX_new2");
+
         if (c->ctx == NULL) {
             g_critical("SSL_CTX_new failed");
             c->event = SPICE_CHANNEL_ERROR_TLS;
@@ -2501,11 +2659,12 @@ reconnect:
         }
 
         SSL_CTX_set_options(c->ctx, ssl_options);
-
+		CHANNEL_DEBUG(channel, "reconnect in SSL_CTX_set_options()");
         verify = spice_session_get_verify(c->session);
         if (verify &
             (SPICE_SESSION_VERIFY_SUBJECT | SPICE_SESSION_VERIFY_HOSTNAME)) {
             rc = spice_channel_load_ca(channel);
+            CHANNEL_DEBUG(channel, "reconnect in spice_channel_load_ca() rc = %d",rc);
             if (rc == 0) {
                 g_warning("no cert loaded");
                 if (verify & SPICE_SESSION_VERIFY_PUBKEY) {
@@ -2513,18 +2672,23 @@ reconnect:
                     verify = SPICE_SESSION_VERIFY_PUBKEY;
                 } else {
                     c->event = SPICE_CHANNEL_ERROR_TLS;
+                    CHANNEL_DEBUG(channel, "reconnect in SPICE_CHANNEL_ERROR_TLS");
                     goto cleanup;
                 }
             }
         }
 
         {
-            const gchar *ciphers = spice_session_get_ciphers(c->session);
+       /*     const gchar *ciphers = spice_session_get_ciphers(c->session);
             if (ciphers != NULL) {
                 rc = SSL_CTX_set_cipher_list(c->ctx, ciphers);
                 if (rc != 1)
                     g_warning("loading cipher list %s failed", ciphers);
             }
+       */
+            rc = SSL_CTX_set_cipher_list(c->ctx, "AES256-SHA256");
+			            if (rc != 1) g_warning("loading cipher list %s failed", "AES256-SHA256");
+            // << fusiondata kkr (CC: cipher TLS_RSA_WITH_AES_256_CBC_SHA256)
         }
 
         c->ssl = SSL_new(c->ctx);
@@ -2534,6 +2698,7 @@ reconnect:
             goto cleanup;
         }
 
+		CHANNEL_DEBUG(channel, "reconnect in bio_new_giostream()");
 
         BIO *bio = bio_new_giostream(G_IO_STREAM(c->conn));
         SSL_set_bio(c->ssl, bio, bio);
@@ -2550,7 +2715,13 @@ reconnect:
         }
 
 ssl_reconnect:
+
+		CHANNEL_DEBUG(channel, "ssl_reconnect in");
+
         rc = SSL_connect(c->ssl);
+
+        CHANNEL_DEBUG(channel, "ssl_reconnect in rc=%d", rc);
+
         if (rc <= 0) {
             rc = SSL_get_error(c->ssl, rc);
             if (rc == SSL_ERROR_WANT_READ || rc == SSL_ERROR_WANT_WRITE) {
@@ -2566,6 +2737,9 @@ ssl_reconnect:
     }
 
 connected:
+
+    CHANNEL_DEBUG(channel, "connected in");
+
     c->has_error = FALSE;
     c->in = g_io_stream_get_input_stream(G_IO_STREAM(c->conn));
     c->out = g_io_stream_get_output_stream(G_IO_STREAM(c->conn));
@@ -2580,6 +2754,8 @@ connected:
         g_warning("%s: could not set sockopt TCP_NODELAY: %s", c->name,
                   strerror(errno));
     }
+
+   // CHANNEL_DEBUG(channel, "connected in before spice_channel_send_link()");
 
     spice_channel_send_link(channel);
     if (!spice_channel_recv_link_hdr(channel) ||
@@ -2612,11 +2788,13 @@ cleanup:
 
 static gboolean connect_delayed(gpointer data)
 {
+	SPICE_DEBUG("connect_delayed() in");
+
     SpiceChannel *channel = data;
     SpiceChannelPrivate *c = channel->priv;
     struct coroutine *co;
 
-    CHANNEL_DEBUG(channel, "Open coroutine starting %p", channel);
+  //  CHANNEL_DEBUG(channel, "connect_delayed() Open coroutine starting %p", channel);
     c->connect_delayed_id = 0;
 
     co = &c->coroutine.coroutine;
@@ -2634,7 +2812,10 @@ static gboolean connect_delayed(gpointer data)
 /* any context */
 static gboolean channel_connect(SpiceChannel *channel, gboolean tls)
 {
+
     SpiceChannelPrivate *c = channel->priv;
+
+    CHANNEL_DEBUG(channel, "channel_connect() in ");
 
     g_return_val_if_fail(c != NULL, FALSE);
 
@@ -2682,10 +2863,16 @@ gboolean spice_channel_connect(SpiceChannel *channel)
     g_return_val_if_fail(SPICE_IS_CHANNEL(channel), FALSE);
     SpiceChannelPrivate *c = channel->priv;
 
-    if (c->state >= SPICE_CHANNEL_STATE_CONNECTING)
+    CHANNEL_DEBUG(channel, "spice_channel_connect() in ");
+
+    if (c->state >= SPICE_CHANNEL_STATE_CONNECTING){
+		CHANNEL_DEBUG(channel, "spice_channel_connect() in c->state >= SPICE_CHANNEL_STATE_CONNECTING return true");
         return TRUE;
+	}
 
     g_return_val_if_fail(channel->priv->fd == -1, FALSE);
+
+    CHANNEL_DEBUG(channel, "spice_channel_connect() in else call channel_connect(channel, FALSE);");
 
     return channel_connect(channel, FALSE);
 }
@@ -2707,6 +2894,8 @@ gboolean spice_channel_open_fd(SpiceChannel *channel, int fd)
 {
     SpiceChannelPrivate *c;
 
+ 	SPICE_DEBUG("spice_channel_open_fd() in");
+
     g_return_val_if_fail(SPICE_IS_CHANNEL(channel), FALSE);
     g_return_val_if_fail(channel->priv != NULL, FALSE);
     g_return_val_if_fail(channel->priv->fd == -1, FALSE);
@@ -2715,10 +2904,13 @@ gboolean spice_channel_open_fd(SpiceChannel *channel, int fd)
     c = channel->priv;
     if (c->state > SPICE_CHANNEL_STATE_CONNECTING) {
         g_warning("Invalid channel_connect state: %d", c->state);
+        CHANNEL_DEBUG(channel, "spice_channel_open_fd() in call channel_connect(channel, TRUE)");
         return true;
     }
 
     c->fd = fd;
+
+    CHANNEL_DEBUG(channel, "spice_channel_open_fd() in call channel_connect(channel, FALSE)");
 
     return channel_connect(channel, FALSE);
 }
@@ -2842,6 +3034,8 @@ void spice_channel_disconnect(SpiceChannel *channel, SpiceChannelEvent reason)
 
 static gboolean test_capability(GArray *caps, guint32 cap)
 {
+	SPICE_DEBUG("test_capability() in");
+
     guint32 c, word_index = cap / 32;
     gboolean ret;
 
@@ -2869,6 +3063,8 @@ static gboolean test_capability(GArray *caps, guint32 cap)
  **/
 gboolean spice_channel_test_capability(SpiceChannel *self, guint32 cap)
 {
+	SPICE_DEBUG("spice_channel_test_capability() in");
+
     SpiceChannelPrivate *c;
 
     g_return_val_if_fail(SPICE_IS_CHANNEL(self), FALSE);
@@ -2943,6 +3139,8 @@ void spice_caps_set(GArray *caps, guint32 cap, const gchar *desc)
 G_GNUC_INTERNAL
 SpiceSession* spice_channel_get_session(SpiceChannel *channel)
 {
+	SPICE_DEBUG("spice_channel_get_session() in");
+
     g_return_val_if_fail(SPICE_IS_CHANNEL(channel), NULL);
 
     return channel->priv->session;
@@ -3007,6 +3205,8 @@ void spice_channel_swap(SpiceChannel *channel, SpiceChannel *swap, gboolean swap
 /* coroutine context */
 static void spice_channel_handle_msg(SpiceChannel *channel, SpiceMsgIn *msg)
 {
+	//SPICE_DEBUG("spice_channel_handle_msg() in");
+
     SpiceChannelClass *klass = SPICE_CHANNEL_GET_CLASS(channel);
     int type = spice_msg_in_type(msg);
     spice_msg_handler handler;
@@ -3032,6 +3232,8 @@ static void spice_channel_reset_capabilities(SpiceChannel *channel)
 
 static void spice_channel_send_migration_handshake(SpiceChannel *channel)
 {
+	SPICE_DEBUG("spice_channel_send_migration_handshake() in");
+
     SpiceChannelPrivate *c = channel->priv;
 
     if (SPICE_CHANNEL_GET_CLASS(channel)->channel_send_migration_handshake) {
@@ -3060,6 +3262,8 @@ static void spice_channel_send_migration_handshake(SpiceChannel *channel)
 void spice_channel_flush_async(SpiceChannel *self, GCancellable *cancellable,
                                GAsyncReadyCallback callback, gpointer user_data)
 {
+	SPICE_DEBUG("spice_channel_flush_async() in");
+
     GSimpleAsyncResult *simple;
     SpiceChannelPrivate *c;
     gboolean was_empty;
@@ -3105,6 +3309,8 @@ void spice_channel_flush_async(SpiceChannel *self, GCancellable *cancellable,
 gboolean spice_channel_flush_finish(SpiceChannel *self, GAsyncResult *result,
                                     GError **error)
 {
+	SPICE_DEBUG("spice_channel_flush_finish() in");
+
     GSimpleAsyncResult *simple;
 
     g_return_val_if_fail(SPICE_IS_CHANNEL(self), FALSE);
