@@ -1,3 +1,3 @@
 [submodule "spice-common"]
-	path = spice-gtk/spice-common
-url=../spice-common
+	path = spice-common
+	url = https://github.com/victorykim/spice-common
