@@ -18,7 +18,6 @@
 #ifndef __SPICE_CLIENT_MAIN_CHANNEL_H__
 #define __SPICE_CLIENT_MAIN_CHANNEL_H__
 
-#include "enums.h"
 #include "spice-client.h"
 
 G_BEGIN_DECLS

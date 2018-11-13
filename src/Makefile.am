@@ -310,7 +310,6 @@ nodist_libspice_client_glib_2_0_la_SOURCES =	\
 
 libspice_client_glibincludedir = $(includedir)/spice-client-glib-2.0
 libspice_client_glibinclude_HEADERS =	\
-	enums.h					\
 	spice-audio.h			\
 	spice-client.h			\
 	spice-uri.h			\
@@ -674,7 +673,7 @@ SpiceClientGLib_2_0_gir_CFLAGS = $(SPICE_COMMON_CPPFLAGS)
 SpiceClientGLib_2_0_gir_LIBS = libspice-client-glib-2.0.la
 SpiceClientGLib_2_0_gir_FILES = $(glib_introspection_files)
 SpiceClientGLib_2_0_gir_EXPORT_PACKAGES = spice-client-glib-2.0
-SpiceClientGLib_2_0_gir_SCANNERFLAGS = --c-include="enums.h" --c-include="spice-client.h"
+SpiceClientGLib_2_0_gir_SCANNERFLAGS = --c-include="spice-client.h"
 INTROSPECTION_GIRS += SpiceClientGLib-2.0.gir
 
 if WITH_GTK
