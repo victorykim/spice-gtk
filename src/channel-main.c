@@ -17,8 +17,6 @@
 */
 #include "config.h"
 
-#include "channel-main.h"
-
 #include <math.h>
 #include <spice/vd_agent.h>
 #include <common/rect.h>
