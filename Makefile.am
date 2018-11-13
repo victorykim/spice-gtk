@@ -13,7 +13,7 @@ SUBDIRS += vapi
 endif
 endif
 
-pkgconfigdir = $(libdir)/pkgconfig
+pkgconfigdir = $(top_srcdir)/pkgconfig
 pkgconfig_DATA =					\
 	spice-client-glib-2.0.pc			\
 	$(NULL)
