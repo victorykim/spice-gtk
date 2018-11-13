@@ -34,6 +34,7 @@
 #include "spice-uri.h"
 #include "spice-version.h"
 
+#include "enums.h"
 #include "channel-main.h"
 #include "channel-display.h"
 #include "channel-cursor.h"
