@@ -310,6 +310,7 @@ nodist_libspice_client_glib_2_0_la_SOURCES =	\
 
 libspice_client_glibincludedir = $(includedir)/spice-client-glib-2.0
 libspice_client_glibinclude_HEADERS =	\
+	enums.h					\
 	spice-audio.h			\
 	spice-client.h			\
 	spice-uri.h			\
