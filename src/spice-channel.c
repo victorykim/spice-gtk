@@ -2625,6 +2625,65 @@ static void *spice_channel_coroutine(void *data)
 
     CHANNEL_DEBUG(channel, "Started background coroutine %p", &c->coroutine);
 
+    {
+        CHANNEL_DEBUG(channel, "SSL Certificate File Debug = %s", c->session->ca_file);
+        c->ctx = SSL_CTX_new(SSLv23_method());
+        if (c->ctx == NULL) {
+            g_critical("SSL_CTX_new failed");
+            c->event = SPICE_CHANNEL_ERROR_TLS;
+            goto cleanup;
+        }
+
+        SSL_CTX_set_options(c->ctx, ssl_options);
+
+        verify = spice_session_get_verify(c->session);
+        if (verify &
+            (SPICE_SESSION_VERIFY_SUBJECT | SPICE_SESSION_VERIFY_HOSTNAME)) {
+            rc = spice_channel_load_ca(channel);
+            if (rc == 0) {
+                g_warning("no cert loaded");
+                if (verify & SPICE_SESSION_VERIFY_PUBKEY) {
+                    g_warning("only pubkey active");
+                    verify = SPICE_SESSION_VERIFY_PUBKEY;
+                } else {
+                    c->event = SPICE_CHANNEL_ERROR_TLS;
+                    goto cleanup;
+                }
+            }
+        }
+
+        {
+            const gchar *ciphers = spice_session_get_ciphers(c->session);
+            if (ciphers != NULL) {
+                rc = SSL_CTX_set_cipher_list(c->ctx, ciphers);
+                if (rc != 1)
+                    g_warning("loading cipher list %s failed", ciphers);
+            }
+        }
+
+        c->ssl = SSL_new(c->ctx);
+        if (c->ssl == NULL) {
+            g_critical("SSL_new failed");
+            c->event = SPICE_CHANNEL_ERROR_TLS;
+            goto cleanup;
+        }
+
+
+        BIO *bio = bio_new_giostream(G_IO_STREAM(c->conn));
+        SSL_set_bio(c->ssl, bio, bio);
+
+        {
+            guint8 *pubkey;
+            guint pubkey_len;
+
+            spice_session_get_pubkey(c->session, &pubkey, &pubkey_len);
+            c->sslverify = spice_openssl_verify_new(c->ssl, verify,
+                spice_session_get_host(c->session),
+                (char*)pubkey, pubkey_len,
+                spice_session_get_cert_subject(c->session));
+        }
+    }
+
     if (spice_session_get_client_provided_socket(c->session)) {
         if (c->fd < 0) {
             g_critical("fd not provided!");
