@@ -2500,7 +2500,9 @@ void spice_session_get_ca(SpiceSession *session, guint8 **ca, guint *size)
     g_return_if_fail(size != NULL);
 
     SpiceSessionPrivate *s = session->priv;
-
+    
+    SPICE_DEBUG("CAAAAAAAAAAAAA %p, ", __FUNCTION__, s->ca);
+    
     *ca = s->ca ? s->ca->data : NULL;
     *size = s->ca ? s->ca->len : 0;
 }
