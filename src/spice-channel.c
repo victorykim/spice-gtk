@@ -2626,7 +2626,7 @@ static void *spice_channel_coroutine(void *data)
     CHANNEL_DEBUG(channel, "Started background coroutine %p", &c->coroutine);
 
     {
-        CHANNEL_DEBUG(channel, "SSL Certificate File Debug = %s", c->session->ca_file);
+        CHANNEL_DEBUG(channel, "SSL Certificate File Debug");
         c->ctx = SSL_CTX_new(SSLv23_method());
         if (c->ctx == NULL) {
             g_critical("SSL_CTX_new failed");
