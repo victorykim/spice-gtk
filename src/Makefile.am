@@ -163,7 +163,7 @@ SPICE_GTK_SOURCES_COMMON +=		\
 	spice-widget-cairo.c		\
 	$(NULL)
 endif
-
+SPICE_GTK_SOURCES_COMMON += va_display_x11.c
 if WITH_VA
 SPICE_GTK_SOURCES_COMMON += va_display_x11.c
 endif
@@ -298,6 +298,7 @@ libspice_client_glib_2_0_la_SOURCES =			\
 	client_sw_canvas.h	\
 	port-forward.c	\
 	$(NULL)
+libspice_client_glib_2_0_la_SOURCES += tinyjpeg.c
 if WITH_VA
 libspice_client_glib_2_0_la_SOURCES += tinyjpeg.c
 endif
@@ -336,7 +337,7 @@ libspice_client_glibinclude_HEADERS =	\
 nodist_libspice_client_glibinclude_HEADERS =	\
 	spice-glib-enums.h			\
 	$(NULL)
-
+nodist_libspice_client_glibinclude_HEADERS += tinyjpeg.h
 if WITH_VA
 nodist_libspice_client_glibinclude_HEADERS += tinyjpeg.h
 endif
