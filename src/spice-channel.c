@@ -1082,12 +1082,15 @@ static int spice_channel_read(SpiceChannel *channel, void *data, size_t length)
     SpiceChannelPrivate *c = channel->priv;
     gsize len = length;
     int ret;
-
+    CHANNEL_DEBUG(channel, "spice_channel_read");
     while (len > 0) {
-        if (c->has_error) return 0; /* has_error is set by disconnect(), return no error */
+        if (c->has_error)
+            CHANNEL_DEBUG(channel, "has_error");
+            return 0; /* has_error is set by disconnect(), return no error */
 
 #if HAVE_SASL
         if (c->sasl_conn)
+            CHANNEL_DEBUG(channel, "sasl_conn");
             ret = spice_channel_read_sasl(channel, data, len);
         else
 #endif
@@ -1103,7 +1106,7 @@ static int spice_channel_read(SpiceChannel *channel, void *data, size_t length)
 #endif
     }
     c->total_read_bytes += length;
-
+    CHANNEL_DEBUG(channel, "sasl_conn ok");
     return length;
 }
 
@@ -1271,7 +1274,7 @@ static void spice_channel_send_link(SpiceChannel *channel)
         g_critical("unknown major %d", protocol);
         return;
     }
-
+    CHANNEL_DEBUG(channel, "version %d", c->link_hdr.minor_version);
     c->link_msg.connection_id = spice_session_get_connection_id(c->session);
     c->link_msg.channel_type  = c->channel_type;
     c->link_msg.channel_id    = c->channel_id;
